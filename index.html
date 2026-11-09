@@ -1,0 +1,2853 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>UPLink</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box;
+      -webkit-tap-highlight-color:transparent; -webkit-touch-callout:none; }
+  html, body { width:100%; height:100%; overflow:hidden; position:fixed;
+    background:#05060f; font-family:-apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    user-select:none; -webkit-user-select:none; touch-action:none; }
+  #wrap { width:100%; height:100%; display:flex; justify-content:center; align-items:center;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  canvas { display:block; background:#05060f; border-radius:10px;
+    box-shadow:0 0 40px rgba(80,160,255,0.15); touch-action:none; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+<script>
+(() => {
+'use strict';
+
+// ============================================================
+//                    КОНФИГУРАЦИЯ ИГРЫ UPLink
+// ============================================================
+// Все настройки собраны в одном объекте. Меняйте значения —
+// игра подстроится. Комментарии у каждого поля описывают:
+//   • что делает параметр
+//   • в каких единицах задан
+//   • рабочий диапазон и влияние на геймплей
+// ============================================================
+const CONFIG = {
+
+  // ============================================================
+  // МИР
+  // ============================================================
+  // Базовые («эталонные») размеры игрового поля. Используются как
+  // база для автомасштаба: реальные W и H пересчитываются под экран
+  // в функции adaptWorld(), а groundY — пропорционально высоте.
+  world: {
+    // Эталонная ширина мира (мировые пиксели).
+    // 400 — портретный мобильный экран 9:16.
+    width: 400,
+
+    // Эталонная высота мира.
+    // 700 — стандарт. Влияет на пропорции и на WORLD_SCALE.
+    height: 700,
+
+    // Y-координата горизонта в эталонном мире: верхняя граница
+    // «земли». Всё ниже — рельеф, антенна, HUD снизу. Всё выше —
+    // небо (звёзды, луна, метеоры, спутники, луч).
+    // 630 при height=700 оставляет 70 px (10%) на землю.
+    groundY: 630,
+  },
+
+  // ============================================================
+  // АВТОМАСШТАБ
+  // ============================================================
+  // Управляет подгонкой мира под экран устройства (телефон, планшет,
+  // компьютер). После пересчёта W, H, GROUND_Y, WORLD_SCALE
+  // пересчитываются автоматически в adaptWorld().
+  adaptive: {
+    // Включить адаптивный мир (true) или использовать
+    // фиксированные 400×700 (false — старое поведение).
+    enabled: true,
+
+    // Целевое соотношение сторон мира (width / height).
+    // 400/700 ≈ 0.571 — «портретная» ориентация.
+    // 0.75 — шире (планшет). 0.5 — уже (очень узкий экран).
+    targetAspect: 400 / 725,
+
+    // Минимальная высота мира в мировых пикселях.
+    // 600 — на маленьком телефоне мир не сжимается в точку.
+    minWorldHeight: 600,
+
+    // Максимальная высота мира.
+    // 1000 — на 4K-мониторе мир не растягивается бесконечно,
+    // иначе элементы становятся крошечными относительно экрана.
+    maxWorldHeight: 1000,
+
+    // Отступ canvas от краёв экрана (CSS-пиксели).
+    // 8 — небольшая «рамка», canvas не прилипает к краю.
+    margin: 0,
+
+    // Максимальный DPR (devicePixelRatio).
+    // 2 — оптимально для retina; 3× = лишняя нагрузка на GPU.
+    maxDPR: 2,
+
+    // Разрешить альбомную ориентацию.
+    // true — на широком экране мир перестраивается под ширину.
+    // false — всегда портрет (с полями по бокам на широком экране).
+    allowLandscape: true,
+
+    // Минимальная ширина мира (защита от экстремально узких экранов).
+    // 320 — уже не сжимаем, иначе элементы перестанут читаться.
+    minWorldWidth: 320,
+  },
+
+  // ============================================================
+  // АНТЕННА
+  // ============================================================
+  // Параметры тарелки, луча и её вращения. Антенна стоит на земле
+  // по центру и «смотрит» лучом в небо.
+  antenna: {
+    // X-координата основания антенны в эталонном мире.
+    // 200 при width=400 — ровно по центру. При адаптации
+    // пересчитывается как W/2.
+    baseX: 200,
+
+    // Базовая длина луча в мировых пикселях.
+    // Используется как «пол» при beamLengthMode='auto'.
+    // 900 — достаточно для стандартного экрана.
+    beamLength: 900,
+
+    // Половина угла раствора луча в радианах.
+    // 0.12 рад ≈ 6.9°. Итоговый конус ≈ 13.8°.
+    // Меньше (0.06) — узкий «карандаш», сложнее ловить.
+    // Больше (0.25) — широкий «фонарь», легче, но грубее.
+    beamHalfAngle: 0.12,
+
+    // Скорость плавного доворота тарелки к целевому углу.
+    // 0.007 — очень плавно (стандарт). 0.02 — резче.
+    // Влияет только на визуал: логика захвата считается по targetAngle.
+    rotateSpeed: 0.005,
+
+    // Минимальный угол наклона луча (радианы, от оси +X).
+    // -π + 0.15 ≈ -2.99 рад — почти вертикально влево-вверх,
+    // но с небольшим запасом, чтобы тарелка не «смотрела в пол».
+    minAngle: -Math.PI + 0.15,
+
+    // Максимальный угол наклона луча (радианы).
+    // -0.15 рад ≈ -8.6° — почти горизонтально вправо, чуть вверх.
+    maxAngle: -0.15,
+
+    // Радиус «тарелки» (полудиаметр параболы) в мировых пикселях.
+    // 22 — стандарт. Больше (30) — крупная тарелка.
+    // Масштабируется на WORLD_SCALE при отрисовке.
+    dishRadius: 22,
+
+    // Глубина чаши тарелки в мировых пикселях (насколько «вогнута»).
+    // 6 — стандарт. 10 — глубокая чаша.
+    dishDepth: 6,
+
+    // Смещение центра чаши от оси вращения (мировые пиксели).
+    // Тарелка «висит» на небольшом расстоянии от шарнира.
+    dishOffset: 10,
+
+    // Расстояние от чаши до субрефлектора (маленького отражателя
+    // на ножках впереди тарелки) в мировых пикселях.
+    subReflDist: 14,
+
+    // Полувысота субрефлектора в мировых пикселях.
+    subReflSize: 5,
+
+    // Прозрачность луча, когда в зоне захвата НЕТ цели (0..1).
+    // 0.06 — едва заметный «дежурный» луч.
+    alphaIdle: 0.06,
+
+    // Прозрачность луча, когда в зоне захвата ЕСТЬ цель (0..1).
+    // 0.32 — луч заметно ярче, сигнал «я работаю».
+    alphaTarget: 0.32,
+
+    // Прозрачность луча на дальнем крае (у основания конуса).
+    // 0.0 — луч плавно растворяется к концу.
+    alphaEdge: 0.0,
+
+    // Общий множитель яркости луча (0..1).
+    // 1.0 — без изменений. 0.5 — приглушить весь луч.
+    alphaCore: 1.0,
+
+    // --- АДАПТИВНАЯ ДЛИНА ЛУЧА ---
+    // Как вычисляется длина луча:
+    //   'fixed'    — ровно beamLength (старое поведение).
+    //   'auto'     — max(beamLength, диагональ мира * factor).
+    //   'diagonal' — диагональ мира * factor (игнорирует beamLength).
+    // 'auto' — рекомендация: на телефоне 900, на большом экране растёт.
+    beamLengthMode: 'auto',
+
+    // Запас длины луча относительно диагонали мира при 'auto'/'diagonal'.
+    // 1.05 — луч достаёт до любого угла экрана + 5% запаса.
+    // Меньше (0.85) — луч короче, но может не доставать до краёв.
+    beamLengthFactor: 1.05,
+  },
+
+  // ============================================================
+  // ЗОНА ЗАХВАТА
+  // ============================================================
+  // Логическая зона, в которой спутник считается «в луче».
+  // Может быть чуть шире или уже визуального луча — для баланса.
+  captureZone: {
+    // Половина угла захвата (радианы). 0.13 рад ≈ 7.4°.
+    // Чуть шире визуального луча (0.12), чтобы прощать мелкие
+    // промахи игрока. Больше (0.2) — «магнит», меньше (0.08) — снайпер.
+    halfAngle: 0.13,
+
+    // Базовая длина зоны захвата (мировые пиксели).
+    // Используется как «пол» при lengthMode='auto'.
+    length: 900,
+
+    // Режим длины зоны захвата. См. antenna.beamLengthMode.
+    // Рекомендуется держать одинаковым с beamLengthMode,
+    // иначе возможен рассинхрон: спутник «в луче», но не захватывается.
+    lengthMode: 'auto',
+
+    // Запас длины зоны захвата относительно диагонали мира.
+    // 1.05 — синхронно с antenna.beamLengthFactor.
+    lengthFactor: 1.05,
+  },
+
+  // ============================================================
+  // ЭНЕРГИЯ
+  // ============================================================
+  // Энергия тратится, пока антенна «держит» цель, и восстанавливается
+  // в покое. При критически низком уровне скорость загрузки падает,
+  // а луч мигает.
+  energy: {
+    // Максимум шкалы энергии. 100 — стандарт.
+    max: 100,
+
+    // Расход энергии в секунду при захвате цели.
+    // 5 — хватает ~20 сек непрерывной работы.
+    // Больше (10) — агрессивнее, меньше (2) — «бесконечная» антенна.
+    drainPerSec: 5,
+
+    // Восстановление энергии в секунду, когда цели нет.
+    // 40 — полный заряд за 2.5 сек. Быстрый «отдых».
+    regenPerSec: 40,
+
+    // Порог «критического» уровня (доля от max: 0..1).
+    // 0.05 = 5%. Ниже — действуют штрафы и мигание луча.
+    criticalThreshold: 0.05,
+
+    // Множитель скорости загрузки данных в критическом режиме.
+    // 0.5 — данные качаются вдвое медленнее.
+    criticalRateMul: 0.5,
+
+    // Частота мигания луча в критическом режиме (Гц).
+    // 6 — заметное тревожное мигание.
+    criticalBlinkHz: 6,
+
+    // Глубина мигания (0..1): насколько сильно падает яркость.
+    // 0.7 — яркость проседает до 30% от обычной.
+    criticalBlinkDepth: 0.7,
+  },
+
+  // ============================================================
+  // СПУТНИКИ
+  // ============================================================
+  // Общие параметры полёта спутников по дуге над антенной.
+  satellite: {
+    // Насколько далеко за краем экрана спутник появляется/исчезает
+    // (мировые пиксели, умножается на WORLD_SCALE).
+    // 80 — плавное «выезжание» из-за края.
+    edgeX: 80,
+
+    // Y-координата, на которой спутники начинают/заканчивают полёт
+    // (в эталонном мире). При адаптации умножается на H/700.
+    // 480 при groundY=630 оставляет 150 px «воздуха».
+    baseY: 480,
+
+    // Минимальная высота дуги над baseY (мировые пиксели).
+    // 80 — низкая дуга, спутник летит близко к земле.
+    minHeight: 80,
+
+    // Максимальная высота дуги над baseY.
+    // 420 — высокая дуга. Реальная высота случайна в [min, max],
+    // но клампается сверху через highestReachableY() — чтобы луч
+    // гарантированно доставал.
+    maxHeight: 420,
+
+    // Минимальное время пролёта через экран (секунды).
+    // 10 — медленный спутник, легко поймать.
+    flightTimeMin: 10,
+
+    // Максимальное время пролёта через экран (секунды).
+    // 15 — ещё медленнее. Скорость = 1 / flightTime.
+    flightTimeMax: 15,
+
+    // Максимум активных спутников одновременно на экране.
+    // 4 — стандарт. Больше (6) — хаос, меньше (2) — спокойно.
+    maxOnScreen: 4,
+  },
+
+  // ============================================================
+  // ТИПЫ СПУТНИКОВ (активные)
+  // ============================================================
+  // Активные спутники — с них можно качать данные и получать очки.
+  // Каждый тип имеет свой цвет, скорость, объём данных и вес (weight).
+  satTypes: {
+
+    // --- Обычный (зелёный) ---
+    normal: {
+      // Основной цвет спутника и его свечения.
+      color: '#5effa0',
+      glow: '#5effa0',
+
+      // Вес в общем спавне (0..1). Сумма весов всех типов = 1.0.
+      // 0.60 — 60% спавнов — обычные.
+      weight: 0.60,
+
+      // Множитель скорости полёта. 1.0 — базовая скорость.
+      speedMul: 1.00,
+
+      // Сколько «единиц данных» нужно скачать. 8 — средний объём.
+      dataAmount: 8,
+
+      // Скорость загрузки (единиц/сек). 2.5 → полная загрузка ~3.2 сек.
+      dataRate: 2.5,
+
+      // Очки за успешный сеанс связи (без бонуса комбо).
+      score: 10,
+
+      // Пул имён. Из него выбирается уникальное имя для спутника.
+      names: ['ЭХО-1', 'ЭХО-2', 'ГЛОБУС', 'МЕТЕОР-М', 'СИРИУС'],
+    },
+
+    // --- Быстрый (синий) ---
+    fast: {
+      color: '#5fb8ff',
+      glow: '#5fb8ff',
+
+      // 30% спавнов.
+      weight: 0.30,
+
+      // Летит на 25% быстрее обычного — сложнее удержать в луче.
+      speedMul: 1.25,
+
+      // Меньше данных, но качаются быстрее.
+      dataAmount: 6,
+      dataRate: 2.0,
+
+      // Больше очков за сложность.
+      score: 15,
+
+      names: ['СТРИЖ', 'КОМЕТА', 'ВЫМПЕЛ', 'ЗЕНИТ', 'БРИЗ'],
+    },
+
+    // --- Редкий (красный) ---
+    rare: {
+      color: '#ff5f7a',
+      glow: '#ff5f7a',
+
+      // 10% спавнов — редкость.
+      weight: 0.10,
+
+      // Летит медленнее (0.85), но данных много — надо долго
+      // держать луч. Высокая награда оправдывает сложность.
+      speedMul: 0.85,
+
+      // Много данных и высокая скорость загрузки.
+      dataAmount: 14,
+      dataRate: 3.0,
+
+      // Максимальные очки за успех.
+      score: 30,
+
+      names: ['ТИТАН', 'АРГО', 'ЦЕНТАВР', 'ГОРИЗОНТ'],
+    },
+  },
+
+  // ============================================================
+  // НЕАКТИВНЫЕ СПУТНИКИ (фон)
+  // ============================================================
+  // «Мёртвые» спутники, пролетают для атмосферы. С них нельзя качать
+  // данные, они не считаются пропущенными и не дают очков.
+  inactive: {
+    // Цвет — приглушённый серый, визуально отличается от активных.
+    color: '#7a869a',
+    glow: '#7a869a',
+
+    // Максимум неактивных на экране одновременно.
+    maxOnScreen: 3,
+
+    // Интервал спавна неактивных (мс). 4000 — раз в 4 сек.
+    spawnInterval: 4000,
+
+    // Множитель скорости полёта (от базовой скорости спутников).
+    speedMul: 1.0,
+
+    // Пул имён для неактивных.
+    names: ['ОРИОН-7', 'ВЕГА', 'ПОЛЯРНАЯ', 'СПУТНИК-3', 'АСТРА', 'СИГМА', 'ДЕЛЬТА', 'ОМЕГА'],
+  },
+
+  // ============================================================
+  // МЕТЕОРЫ (падающие звёзды)
+  // ============================================================
+  // Метеоры могут лететь в ЛЮБОМ направлении: слева→направо,
+  // справа→налево, сверху вниз и по диагонали. Направления
+  // включаются флагами ниже.
+  meteors: {
+    // Включить/выключить метеоры полностью.
+    // true — падающие звёзды есть на небе, false — небо «чистое».
+    enabled: true,
+
+    // Минимальный интервал между появлениями (мс).
+    // 2500 — не реже одной падающей звезды раз в 2.5 сек.
+    spawnIntervalMin: 2500,
+
+    // Максимальный интервал (мс).
+    // 7000 — иногда до 7 сек тишины. Реальный интервал случайный
+    // в диапазоне [min, max].
+    spawnIntervalMax: 7000,
+
+    // Минимальная скорость полёта (px/сек).
+    // 400 — неторопливый метеор.
+    speedMin: 400,
+
+    // Максимальная скорость полёта (px/сек).
+    // 700 — быстрый росчерк. Скорость случайна в [min, max].
+    speedMax: 700,
+
+    // Минимальное время жизни (секунды).
+    // 0.5 — короткий метеор, пролетает меньше экрана.
+    durationMin: 0.5,
+
+    // Максимальное время жизни (секунды).
+    // 1.2 — длинный метеор, успевает пересечь большую часть неба.
+    durationMax: 1.2,
+
+    // Длина хвоста (мировые пиксели).
+    // 80 — компактный след. 150+ — длинный «росчерк».
+    length: 80,
+
+    // Толщина хвоста (мировые пиксели).
+    // 2 — тонкая линия. 4 — жирный яркий след.
+    trailWidth: 2,
+
+    // Цвет головы метеора.
+    // '#ffffff' — белый. '#fff2a0' — тёплый. '#a0d8ff' — холодный.
+    color: '#ffffff',
+
+    // -------- НАПРАВЛЕНИЯ --------
+    // Разрешить полёт слева направо (→).
+    allowLeftToRight: true,
+
+    // Разрешить полёт справа налево (←).
+    allowRightToLeft: true,
+
+    // Разрешить вертикальный полёт сверху вниз (↓).
+    allowTopToBottom: true,
+
+    // Разрешить диагональные полёты (↘ ↙).
+    allowDiagonals: true,
+
+    // Случайный разброс угла вокруг выбранного направления (градусы).
+    // 0 — строго по направлениям (ровно 180° влево и т.д.).
+    // 20 — «естественный» разлёт ±20° вокруг базового угла.
+    // Больше (45+) — почти хаос, направление почти не читается.
+    angleSpread: 20,
+  },
+
+  // ============================================================
+  // СПАВН АКТИВНЫХ
+  // ============================================================
+  // Настройки появления активных спутников. С каждым уровнем
+  // интервал уменьшается — игра становится напряжённее.
+  spawn: {
+    // Стартовый интервал спавна на 1-м уровне (мс).
+    // 2200 — спутник примерно раз в 2.2 сек.
+    initialInterval: 2200,
+
+    // Минимальный интервал (мс) — «пол» ускорения.
+    // 1200 — даже на высоких уровнях спутники не чаще 1.2 сек.
+    minInterval: 1200,
+
+    // На сколько миллисекунд уменьшается интервал за каждый уровень.
+    // 80 — уровень +1 → интервал −80 мс.
+    // Больше (150) — резкое ускорение, меньше (40) — плавное.
+    intervalDecreasePerLevel: 80,
+  },
+
+  // ============================================================
+  // ПРОГРЕССИЯ
+  // ============================================================
+  // Очки, уровни, комбо и лимит пропусков.
+  progression: {
+    // Стартовый порог прогресса до 2-го уровня.
+    // 100 — нужно набрать 100 «очков прогресса».
+    levelProgressStart: 100,
+
+    // Прибавка к порогу за каждый следующий уровень.
+    // 20 → 2-й ур.: 120, 3-й: 140 и т.д. Кривая усложнения.
+    levelProgressAdd: 20,
+
+    // Окно комбо (мс). Если поймать следующий спутник быстрее,
+    // чем за это время, — комбо растёт.
+    // 2500 — 2.5 сек между захватами.
+    comboWindowMs: 2500,
+
+    // Каждые N подряд захватов дают бонус к очкам.
+    // 3 — каждый 3-й захват в серии даёт бонус.
+    comboBonusEvery: 3,
+
+    // Сколько очков добавляет каждый бонус комбо.
+    // 5 — +5 очков за каждые 3 подряд.
+    comboBonusPoints: 5,
+
+    // Сколько спутников можно пропустить до конца игры.
+    // 5 — после 5 пропусков «Сигнал потерян».
+    // 0 — отключить лимит (игра бесконечная).
+    missedLimit: 3,
+
+    // Сбрасывать ли счётчик пропусков при повышении уровня.
+    // true — на новом уровне «прощается» до 5 пропусков заново.
+    // false — пропуски копятся всю игру.
+    resetMissedOnLevelUp: true,
+  },
+
+  // ============================================================
+  // ЗВЁЗДЫ
+  // ============================================================
+  // Фоновые звёзды. Медленно дрейфуют — создают ощущение вращения
+  // неба. ВАЖНО: знак driftX задаёт направление движения луны.
+  stars: {
+    // Количество звёзд на небе.
+    // 160 — стандарт. Больше (300) — густое небо.
+    count: 160,
+
+    // Дрейф по X (px/сек). Отрицательное — влево.
+    // -6 — медленный дрейф влево (суточное вращение неба).
+    // 0 — звёзды стоят. +6 — вправо (противоположное вращение).
+    // Знак этого параметра задаёт направление движения луны.
+    driftX: -6,
+
+    // Дрейф по Y (px/сек). Положительное — вниз, к горизонту.
+    // 2.5 — медленно опускаются. 0 — только горизонтально.
+    // -2.5 — поднимаются.
+    driftY: 2.5,
+
+    // Минимальный параллакс-множитель скорости звезды.
+    // 0.4 — далёкие звёзды движутся в 0.4× от базовой скорости.
+    speedMin: 0.4,
+
+    // Максимальный параллакс-множитель скорости.
+    // 1.0 — близкие звёзды движутся с полной скоростью.
+    // Разброс [0.4..1.0] даёт эффект глубины.
+    speedMax: 1.0,
+  },
+
+  // ============================================================
+  // ЛУНА
+  // ============================================================
+  // Луна случайно появляется на небе, движется по дуге в ту же
+  // сторону, что и звёзды, и уходит за край. Затем «возвращается»
+  // с другой стороны после паузы.
+  moon: {
+    // Радиус диска луны (мировые пиксели, умножается на WORLD_SCALE).
+    // 12 — маленькая. 16 — стандарт. 24 — крупная, «полнолуние».
+    radius: 16,
+
+    // Минимальная высота дуги над горизонтом (мировые пиксели).
+    // 120 — луна низко над землёй. Умножается на WORLD_SCALE.
+    minArcHeight: 120,
+
+    // Максимальная высота дуги.
+    // 550 — луна высоко в небе. Высота случайна в [min, max].
+    maxArcHeight: 550,
+
+    // Скорость движения по дуге (рад/сек параметра t).
+    // 0.003 — очень медленно (стандарт). 0.008 — заметно.
+    // 0.02 — быстро, луна проносится по небу.
+    speed: 0.003,
+
+    // Начальная позиция на дуге (0..1) при загрузке.
+    // 0.0 — только что вышла. 1.0 — почти скрылась.
+    // Реальная стартовая t случайна в [min, max]. 
+    startTMin: 0.0,
+    startTMax: 1.0,
+
+    // Яркость ореола вокруг луны (0..1).
+    // 0.40 — мягкое свечение. 0.8 — яркий «фонарь».
+    glowAlpha: 0.40,
+
+    // Радиус ореола относительно радиуса диска.
+    // 2.2 — ореол в 2.2 раза больше луны.
+    glowScale: 2.2,
+
+    // Случайная фаза луны при каждом запуске.
+    // true — каждый запуск новая фаза (месяц, полнолуние и т.д.).
+    // false — фаза фиксирована (0 — половина).
+    randomPhase: true,
+
+    // Шанс появления луны (0..1).
+    // 0.85 — в 15% запусков луны на небе не будет.
+    appearChance: 0.85,
+
+    // Цвет диска луны.
+    color: '#e8e0c8',
+
+    // Цвет теневой (неосвещённой) части луны.
+    shadowColor: '#3a4055',
+
+    // Пауза между «уходом» луны и её повторным появлением (секунды).
+    // 8 — заметное отсутствие. 3 — короткая пауза.
+    reappearDelaySec: 8,
+  },
+
+  // ============================================================
+  // ОТВЕТНЫЙ ЛУЧ СПУТНИКА
+  // ============================================================
+  // Визуализация «ответного сигнала»: от спутника к тарелке бегут
+  // светящиеся пакеты, пока идёт загрузка данных.
+  uplink: {
+    // Толщина линии ответного луча (мировые пиксели).
+    // 1.5 — тонкая. 3 — заметная жирная.
+    lineWidth: 1.5,
+
+    // Использовать цвет спутника для ответного луча.
+    // true — цвет берётся из s.cfg.color.
+    // false — фиксированный '#a0e0ff'.
+    useSatColor: true,
+
+    // Куда приходит ответный луч.
+    // 'dish' — к субрефлектору тарелки (реалистично).
+    // 'base' — к основанию антенны.
+    // 'beam' — в точку на луче (60 px от основания).
+    target: 'dish',
+
+    // Скорость движения пакетов по лучу (циклов/сек параметра).
+    // 1.2 — пакеты неторопливо бегут к тарелке.
+    packetSpeed: 1.2,
+
+    // Сколько пакетов одновременно летит по лучу.
+    // 3 — стандарт. 5 — плотный поток.
+    packetCount: 3,
+
+    // Радиус одного пакета (мировые пиксели).
+    // 2.2 — маленькая точка. 3.5 — крупный «сгусток».
+    packetRadius: 2.2,
+
+    // Базовая прозрачность ответного луча (0..1).
+    // 0.55 — полупрозрачный.
+    baseAlpha: 0.55,
+
+    // Амплитуда пульсации прозрачности (0..1).
+    // 0.25 — яркость «дышит» на ±25%.
+    pulseAmp: 0.25,
+
+    // Скорость пульсации (рад/сек).
+    // 6 — быстрое мерцание. 2 — медленное «дыхание».
+    pulseSpeed: 6,
+  },
+
+  // ============================================================
+  // АВТОСОПРОВОЖДЕНИЕ (АС)
+  // ============================================================
+  // Кнопка «АС» — временная авто-наводка на лучшую цель.
+  // Открывается на определённом уровне и имеет заряды.
+  autoTrack: {
+    // Уровень, на котором открывается АС.
+    // 2 — доступна со 2-го уровня.
+    unlockLevel: 2,
+
+    // Сколько зарядов АС даётся за каждый новый уровень.
+    // 1 — по одному заряду за уровень.
+    chargesPerLevel: 1,
+
+    // Максимум зарядов АС одновременно.
+    // 3 — не больше трёх «пусков» в запасе.
+    maxCharges: 3,
+
+    // Длительность одного включения АС (секунды).
+    // 60 — целая минута авто-наводки за один заряд.
+    durationSec: 15,
+
+    // Радиус кнопки АС на экране (мировые пиксели).
+    // 26 — стандарт. Умножается на WORLD_SCALE.
+    buttonRadius: 26,
+
+    // Отступ кнопки АС от правого и нижнего края (мировые пиксели).
+    // 16 — стандарт.
+    buttonMargin: 16,
+
+    // Скорость доворота антенны в режиме АС (рад/сек).
+    // 4.0 — плавно, но уверенно.
+    turnSpeed: 4.0,
+
+    // Использовать упреждение (стрелять «наперёд»).
+    // true — АС целится туда, где спутник будет через leadSec.
+    useLead: true,
+
+    // Время упреждения (секунды).
+    // 0.25 — целиться на 0.25 сек вперёд по траектории.
+    leadSec: 0.25,
+
+    // Сколько миллисекунд после касания экрана игрок «главнее» АС.
+    // 500 — 0.5 сек ручного управления перебивают АС.
+    manualOverrideMs: 500,
+
+    // Держать выбранную цель до конца (не переключаться на лету).
+    // true — АС добивает текущую цель.
+    // false — пересчитывает цель каждый кадр.
+    holdUntilDone: true,
+
+    // Запас времени (секунды) при выборе цели «успеем ли добить».
+    // 0.3 — цель считается «добиваемой», если времени хватает
+    // с запасом 0.3 сек.
+    priorityMargin: 0.3,
+
+    // Предпочитать цели, которые АС успевает добить.
+    // true — приоритет «добиваемым». false — приоритет по прогрессу.
+    preferFinishing: true,
+
+    // Пауза после потери цели (секунды).
+    // 0.2 — короткая задержка перед выбором новой.
+    lostTargetCooldownSec: 0.2,
+
+    // Интервал пересчёта цели (секунды).
+    // 0 — пересчитывать каждый кадр.
+    retargetIntervalSec: 0,
+
+    // Цвет кнопки/обводки, когда АС активна.
+    activeColor: '#5effa0',
+
+    // Цвет кнопки, когда АС доступна, но не активна.
+    idleColor: '#5fb8ff',
+
+    // Цвет кнопки, когда АС ещё не открыта.
+    lockedColor: '#4a5a78',
+  },
+
+  // ============================================================
+  // ЗВУК
+  // ============================================================
+  // Все звуки синтезируются через Web Audio API — без файлов.
+  // Каждый звук имеет свой набор параметров.
+  audio: {
+    // Общая громкость всех звуков (0..1).
+    // 0.35 — комфортный уровень.
+    masterVolume: 0.35,
+
+    // Включить звук в игре.
+    // true — звук есть, false — полная тишина.
+    enabled: true,
+
+    // --- Звук захвата цели (спутник попал в луч) ---
+    capture: {
+      // Включить этот звук.
+      enabled: true,
+
+      // Громкость относительно masterVolume (0..1).
+      volume: 0.07,
+
+      // Две ноты подряд (Гц).
+      // 784 — соль, 1046 — до второй октавы.
+      freq1: 784,
+      freq2: 1046,
+
+      // Длительность каждой ноты (секунды).
+      duration: 0.15,
+
+      // Тип волны: 'sine', 'square', 'sawtooth', 'triangle'.
+      type: 'triangle',
+    },
+
+    // --- Тик загрузки данных (по умолчанию выключен) ---
+    downloadTick: {
+      // Включить. false — тики не звучат (рекомендуется:
+      // не мешает игре).
+      enabled: false,
+
+      volume: 0.04,
+
+      // Базовая частота (Гц).
+      freq: 700,
+
+      // Расстройка второго осциллятора (центы) — «хор» из двух нот.
+      detune: 8,
+
+      duration: 0.35,
+
+      type: 'sine',
+
+      // Интервал между тиками (мс). 700 — раз в 0.7 сек.
+      intervalMs: 700,
+    },
+
+    // --- Звук успешной загрузки (спутник полностью скачан) ---
+    complete: {
+      enabled: true,
+      volume: 0.07,
+
+      // Плавный «взлёт» частоты от freqStart к freqEnd.
+      freqStart: 660,
+      freqEnd: 990,
+
+      duration: 0.08,
+      type: 'sine',
+    },
+
+    // --- Звук пропуска (спутник ушёл, не скачан) ---
+    miss: {
+      enabled: true,
+      volume: 0.07,
+
+      // Нисходящий «вздох»: от 440 к 220 Гц.
+      freqStart: 440,
+      freqEnd: 220,
+
+      duration: 0.25,
+      type: 'sawtooth',
+    },
+
+    // --- Звук повышения уровня ---
+    levelUp: {
+      enabled: true,
+      volume: 0.1,
+
+      // Три ноты подряд (Гц): до, ми, соль — мажорный аккорд.
+      freq1: 523,
+      freq2: 659,
+      freq3: 784,
+
+      // Длительность каждой ноты.
+      duration: 0.12,
+      type: 'triangle',
+    },
+
+    // --- Звук конца игры ---
+    gameOver: {
+      enabled: true,
+      volume: 0.1,
+
+      // Нисходящий «обвал»: 330 → 110 Гц.
+      freqStart: 330,
+      freqEnd: 110,
+
+      duration: 0.8,
+      type: 'sawtooth',
+    },
+
+    // --- Звук включения АС ---
+    autoTrack: {
+      enabled: true,
+      volume: 0.5,
+
+      // Восходящий «свист»: 400 → 1200 Гц.
+      freqStart: 400,
+      freqEnd: 1200,
+
+      duration: 0.15,
+      type: 'triangle',
+    },
+
+    // --- Звук критически низкой энергии ---
+    critical: {
+      enabled: true,
+      volume: 0.3,
+
+      // Частота «писка» (Гц). 1200 — тревожно.
+      freq: 1200,
+
+      duration: 0.06,
+      type: 'square',
+
+      // Интервал между писками (мс).
+      // 1000 — раз в секунду, пока энергия в критической зоне.
+      intervalMs: 1000,
+    },
+  },
+};
+
+// ============================================================
+// АДАПТИВНЫЙ МИР
+// ============================================================
+let W = CONFIG.world.width;
+let H = CONFIG.world.height;
+let GROUND_Y = CONFIG.world.groundY;
+let ANTENNA_BASE = { x: CONFIG.antenna.baseX, y: GROUND_Y };
+let ANTENNA_X = CONFIG.antenna.baseX;
+let WORLD_SCALE = 1;
+let DEVICE = 'desktop';
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d', { alpha: false });
+let DPR = Math.min(window.devicePixelRatio || 1, CONFIG.adaptive.maxDPR);
+
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const DEG = Math.PI / 180;
+
+// ============================================================
+// АДАПТИВНАЯ ДЛИНА ЛУЧА
+// ============================================================
+function worldDiagonal() {
+  return Math.hypot(W, H);
+}
+
+function beamLengthWorld() {
+  const cfg = CONFIG.antenna;
+  if (cfg.beamLengthMode === 'fixed') return cfg.beamLength;
+  const diag = worldDiagonal() * cfg.beamLengthFactor;
+  if (cfg.beamLengthMode === 'diagonal') return diag;
+  return Math.max(cfg.beamLength, diag);
+}
+
+function captureLengthWorld() {
+  const cfg = CONFIG.captureZone;
+  if (cfg.lengthMode === 'fixed') return cfg.length;
+  const diag = worldDiagonal() * cfg.lengthFactor;
+  if (cfg.lengthMode === 'diagonal') return diag;
+  return Math.max(cfg.length, diag);
+}
+
+// Самая высокая Y, до которой достаёт луч (для спутника у края по X).
+function highestReachableY() {
+  const L = beamLengthWorld() - 20;
+  const halfW = W / 2;
+  const inner = Math.max(0, L * L - halfW * halfW);
+  return ANTENNA_BASE.y - Math.sqrt(inner);
+}
+
+// ============================================================
+// ОПРЕДЕЛЕНИЕ УСТРОЙСТВА И АДАПТАЦИЯ МИРА
+// ============================================================
+function detectDevice(availW, availH) {
+  const minSide = Math.min(availW, availH);
+  const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  if (minSide < 500 && hasTouch) return 'phone';
+  if (minSide < 900) return 'tablet';
+  return 'desktop';
+}
+
+function adaptWorld(availW, availH) {
+  if (!CONFIG.adaptive.enabled) {
+    W = CONFIG.world.width;
+    H = CONFIG.world.height;
+    GROUND_Y = CONFIG.world.groundY;
+    ANTENNA_BASE = { x: CONFIG.antenna.baseX, y: GROUND_Y };
+    ANTENNA_X = CONFIG.antenna.baseX;
+    WORLD_SCALE = 1;
+    return;
+  }
+
+  const availAspect = availW / availH;
+  const targetAspect = CONFIG.adaptive.targetAspect;
+  let worldW, worldH;
+
+  if (CONFIG.adaptive.allowLandscape && availAspect > 1) {
+    worldH = clamp(availH * 0.85, CONFIG.adaptive.minWorldHeight, CONFIG.adaptive.maxWorldHeight);
+    worldW = worldH * availAspect;
+  } else {
+    const desiredH = clamp(
+      Math.min(availH * 0.9, CONFIG.adaptive.maxWorldHeight),
+      CONFIG.adaptive.minWorldHeight,
+      CONFIG.adaptive.maxWorldHeight
+    );
+    const desiredW = desiredH * targetAspect;
+    if (desiredW > availW * 0.95) {
+      worldW = Math.max(CONFIG.adaptive.minWorldWidth, availW * 0.95);
+      worldH = worldW / targetAspect;
+    } else {
+      worldW = desiredW;
+      worldH = desiredH;
+    }
+  }
+
+  W = Math.round(worldW);
+  H = Math.round(worldH);
+  GROUND_Y = Math.round(H * (CONFIG.world.groundY / CONFIG.world.height));
+  ANTENNA_BASE = { x: Math.round(W / 2), y: GROUND_Y };
+  ANTENNA_X = ANTENNA_BASE.x;
+  WORLD_SCALE = H / CONFIG.world.height;
+}
+
+// ============================================================
+// РАЗМЕР CANVAS
+// ============================================================
+function resize() {
+  const wrap = document.getElementById('wrap');
+  const availW = wrap.clientWidth;
+  const availH = wrap.clientHeight;
+  DEVICE = detectDevice(availW, availH);
+  adaptWorld(availW, availH);
+  DPR = Math.min(window.devicePixelRatio || 1, CONFIG.adaptive.maxDPR);
+
+  const margin = CONFIG.adaptive.margin;
+  const maxW = Math.max(100, availW - margin * 2);
+  const maxH = Math.max(100, availH - margin * 2);
+  const scale = Math.min(maxW / W, maxH / H);
+  const cssW = Math.floor(W * scale);
+  const cssH = Math.floor(H * scale);
+
+  canvas.style.width = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+  canvas.width = Math.floor(cssW * DPR);
+  canvas.height = Math.floor(cssH * DPR);
+  ctx.setTransform((cssW * DPR) / W, 0, 0, (cssH * DPR) / H, 0, 0);
+
+  recalcWorldDependents();
+}
+
+function recalcWorldDependents() {
+  for (const s of stars) {
+    if (s.x > W) s.x = Math.random() * W;
+    if (s.y > GROUND_Y) s.y = Math.random() * GROUND_Y;
+  }
+  initGroundDetails();
+  initMoon();
+  meteors.length = 0;
+
+  // Пересчёт спутников под новую высоту мира и потолок луча.
+  const baseY = Math.round(H * (CONFIG.satellite.baseY / CONFIG.world.height));
+  const ceiling = highestReachableY();
+  for (const s of satellites) {
+    s.baseY = baseY;
+    let ratio = s.arcRatio;
+    if (typeof ratio !== 'number') {
+      ratio = (baseY - s.peakY) / Math.max(1, baseY);
+      s.arcRatio = ratio;
+    }
+    let newPeakY = baseY - ratio * baseY;
+    if (newPeakY < ceiling) newPeakY = ceiling;
+    s.peakY = newPeakY;
+  }
+}
+
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', resize);
+}
+
+// ============================================================
+// ЗВУК
+// ============================================================
+let audioCtx = null;
+let audioUnlocked = false;
+let soundMuted = false;
+
+function ensureAudio() {
+  if (!CONFIG.audio.enabled) return null;
+  if (audioUnlocked && audioCtx) return audioCtx;
+  try {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      audioCtx = new AC();
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    audioUnlocked = true;
+    return audioCtx;
+  } catch (_) { return null; }
+}
+
+function playTone(freqStart, freqEnd, duration, type, vol) {
+  const ac = ensureAudio();
+  if (!ac) return;
+  const cfg = CONFIG.audio;
+  const gain = ac.createGain();
+  const osc = ac.createOscillator();
+  const t0 = ac.currentTime;
+  const peak = cfg.masterVolume * vol;
+  osc.type = type || 'sine';
+  osc.frequency.setValueAtTime(freqStart, t0);
+  if (freqEnd !== freqStart) {
+    osc.frequency.exponentialRampToValueAtTime(Math.max(20, freqEnd), t0 + duration);
+  }
+  gain.gain.setValueAtTime(0, t0);
+  gain.gain.linearRampToValueAtTime(peak, t0 + duration * 0.1);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+  osc.connect(gain);
+  gain.connect(ac.destination);
+  osc.start(t0);
+  osc.stop(t0 + duration + 0.02);
+}
+
+function playPulse(freq, detuneCents, duration, type, vol) {
+  const ac = ensureAudio();
+  if (!ac) return;
+  const cfg = CONFIG.audio;
+  const t0 = ac.currentTime;
+  const peak = cfg.masterVolume * vol;
+  const osc1 = ac.createOscillator();
+  const osc2 = ac.createOscillator();
+  osc1.type = type || 'sine';
+  osc2.type = type || 'sine';
+  osc1.frequency.setValueAtTime(freq, t0);
+  osc2.frequency.setValueAtTime(freq, t0);
+  osc2.detune.setValueAtTime(detuneCents || 0, t0);
+  const gain = ac.createGain();
+  gain.gain.setValueAtTime(0, t0);
+  gain.gain.linearRampToValueAtTime(peak, t0 + duration * 0.2);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+  const lfo = ac.createOscillator();
+  const lfoGain = ac.createGain();
+  lfo.type = 'sine';
+  lfo.frequency.setValueAtTime(6, t0);
+  lfoGain.gain.setValueAtTime(peak * 0.25, t0);
+  lfo.connect(lfoGain);
+  lfoGain.connect(gain.gain);
+  osc1.connect(gain);
+  osc2.connect(gain);
+  gain.connect(ac.destination);
+  osc1.start(t0); osc2.start(t0); lfo.start(t0);
+  osc1.stop(t0 + duration + 0.02);
+  osc2.stop(t0 + duration + 0.02);
+  lfo.stop(t0 + duration + 0.02);
+}
+
+function sfx(name) {
+  if (state.demo) return;
+  if (soundMuted) return;
+  const cfg = CONFIG.audio;
+  if (!cfg.enabled) return;
+  const s = cfg[name];
+  if (!s || s.enabled === false) return;
+  switch (name) {
+    case 'capture':
+      playTone(s.freq1, s.freq1, s.duration, s.type, s.volume);
+      setTimeout(() => playTone(s.freq2, s.freq2, s.duration, s.type, s.volume), 60);
+      break;
+    case 'downloadTick': playPulse(s.freq, s.detune, s.duration, s.type, s.volume); break;
+    case 'complete': playTone(s.freqStart, s.freqEnd, s.duration, s.type, s.volume); break;
+    case 'miss': playTone(s.freqStart, s.freqEnd, s.duration, s.type, s.volume); break;
+    case 'levelUp':
+      playTone(s.freq1, s.freq1, s.duration, s.type, s.volume);
+      setTimeout(() => playTone(s.freq2, s.freq2, s.duration, s.type, s.volume), s.duration * 1000 * 0.8);
+      setTimeout(() => playTone(s.freq3, s.freq3, s.duration, s.type, s.volume), s.duration * 1000 * 1.6);
+      break;
+    case 'gameOver': playTone(s.freqStart, s.freqEnd, s.duration, s.type, s.volume); break;
+    case 'autoTrack': playTone(s.freqStart, s.freqEnd, s.duration, s.type, s.volume); break;
+    case 'critical': playTone(s.freq, s.freq, s.duration, s.type, s.volume); break;
+  }
+}
+
+function unlockAudio() { ensureAudio(); }
+
+// ============================================================
+// ЗВЁЗДЫ
+// ============================================================
+const stars = [];
+function initStars() {
+  stars.length = 0;
+  for (let i = 0; i < CONFIG.stars.count; i++) {
+    const speedMul = rand(CONFIG.stars.speedMin, CONFIG.stars.speedMax);
+    stars.push({
+      x: Math.random() * W,
+      y: Math.random() * GROUND_Y,
+      r: rand(0.4, 1.6),
+      phase: Math.random() * Math.PI * 2,
+      twinkleSpeed: rand(0.4, 1.6),
+      baseAlpha: rand(0.3, 1),
+      speedMul
+    });
+  }
+}
+
+function updateStars(dt) {
+  const ds = dt / 1000;
+  const dxBase = CONFIG.stars.driftX * ds;
+  const dyBase = CONFIG.stars.driftY * ds;
+  for (const s of stars) {
+    s.x += dxBase * s.speedMul;
+    s.y += dyBase * s.speedMul;
+    s.phase += dt * 0.001 * s.twinkleSpeed;
+    if (s.x < -2) { s.x = W + 2; s.y = Math.random() * GROUND_Y; }
+    if (s.y > GROUND_Y + 2) { s.y = -2; s.x = Math.random() * W; }
+  }
+}
+
+// ============================================================
+// МЕТЕОРЫ
+// ============================================================
+const meteors = [];
+let nextMeteorAt = 0;
+
+function pickMeteorAngle() {
+  const cfg = CONFIG.meteors;
+  const options = [];
+  if (cfg.allowLeftToRight) options.push(0);
+  if (cfg.allowRightToLeft) options.push(Math.PI);
+  if (cfg.allowTopToBottom) options.push(Math.PI / 2);
+  if (cfg.allowDiagonals) { options.push(Math.PI / 4); options.push(Math.PI * 3 / 4); }
+  if (options.length === 0) return Math.PI / 2;
+  const base = options[Math.floor(Math.random() * options.length)];
+  const spread = cfg.angleSpread * (Math.random() * 2 - 1) * DEG;
+  return base + spread;
+}
+
+function spawnMeteor() {
+  const cfg = CONFIG.meteors;
+  if (!cfg.enabled) return;
+  const angle = pickMeteorAngle();
+  const dx = Math.cos(angle);
+  const dy = Math.sin(angle);
+  const speed = rand(cfg.speedMin, cfg.speedMax);
+  const cx = rand(W * 0.15, W * 0.85);
+  const cy = rand(-20, GROUND_Y * 0.4);
+  const back = Math.max(W, H) * 0.6;
+  const startX = cx - dx * back;
+  const startY = cy - dy * back;
+  const maxLife = rand(cfg.durationMin, cfg.durationMax);
+  meteors.push({
+    x: startX, y: startY,
+    vx: dx * speed, vy: dy * speed,
+    angle, life: maxLife, maxLife,
+  });
+}
+
+function updateMeteors(dt) {
+  const cfg = CONFIG.meteors;
+  if (!cfg.enabled) return;
+  const ds = dt / 1000;
+  const nowMs = performance.now();
+  if (nowMs >= nextMeteorAt) {
+    spawnMeteor();
+    nextMeteorAt = nowMs + rand(cfg.spawnIntervalMin, cfg.spawnIntervalMax);
+  }
+  for (let i = meteors.length - 1; i >= 0; i--) {
+    const m = meteors[i];
+    m.x += m.vx * ds;
+    m.y += m.vy * ds;
+    m.life -= ds;
+    const offX = m.x < -120 || m.x > W + 120;
+    const offY = m.y < -120 || m.y > GROUND_Y + 80;
+    if (m.life <= 0 || offX || offY) meteors.splice(i, 1);
+  }
+}
+
+function drawMeteors() {
+  const cfg = CONFIG.meteors;
+  if (!cfg.enabled) return;
+  for (const m of meteors) {
+    const a = clamp(m.life / m.maxLife, 0, 1);
+    const vLen = Math.hypot(m.vx, m.vy) || 1;
+    const bx = m.x - (m.vx / vLen) * cfg.length;
+    const by = m.y - (m.vy / vLen) * cfg.length;
+    const grad = ctx.createLinearGradient(m.x, m.y, bx, by);
+    grad.addColorStop(0, `rgba(255,255,255,${a})`);
+    grad.addColorStop(0.4, `rgba(200,220,255,${a * 0.5})`);
+    grad.addColorStop(1, 'rgba(150,180,255,0)');
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = cfg.trailWidth;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(m.x, m.y);
+    ctx.lineTo(bx, by);
+    ctx.stroke();
+    ctx.fillStyle = cfg.color;
+    ctx.globalAlpha = a;
+    ctx.beginPath();
+    ctx.arc(m.x, m.y, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// ЛУНА
+// ============================================================
+const moon = {
+  active: false, t: 0, speed: 0, arcHeight: 0, phase: 0, craters: [], glowPhase: 0,
+  respawnTimer: 0, waiting: false, fadeIn: 1,
+};
+
+function initMoon() {
+  const cfg = CONFIG.moon;
+  moon.active = Math.random() < cfg.appearChance;
+  moon.waiting = false;
+  moon.respawnTimer = 0;
+  moon.fadeIn = 1;
+  if (!moon.active) return;
+  moon.t = rand(cfg.startTMin, cfg.startTMax);
+  moon.speed = cfg.speed * rand(0.9, 1.1);
+  moon.arcHeight = rand(cfg.minArcHeight, cfg.maxArcHeight) * WORLD_SCALE;
+  moon.phase = cfg.randomPhase ? Math.random() : 0;
+  moon.glowPhase = Math.random() * Math.PI * 2;
+  moon.craters = [];
+  const n = 5 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < n; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const dist = Math.random() * 0.65;
+    moon.craters.push({
+      rx: Math.cos(ang) * dist, ry: Math.sin(ang) * dist,
+      rr: rand(0.08, 0.22), alpha: rand(0.12, 0.3)
+    });
+  }
+}
+
+function moonPos() {
+  const t = clamp(moon.t, 0, 1);
+  const dir = CONFIG.stars.driftX >= 0 ? 1 : -1;
+  const x = dir > 0 ? lerp(-40, W + 40, t) : lerp(W + 40, -40, t);
+  const arc = Math.sin(t * Math.PI);
+  const yOnArc = GROUND_Y - moon.arcHeight * arc;
+  const startY = GROUND_Y + CONFIG.moon.radius * WORLD_SCALE + 4;
+  const y = lerp(startY, yOnArc, moon.fadeIn);
+  return { x, y };
+}
+
+function updateMoon(dt) {
+  const cfg = CONFIG.moon;
+  const ds = dt / 1000;
+  if (moon.waiting) {
+    moon.respawnTimer -= ds;
+    if (moon.respawnTimer <= 0) {
+      moon.t = 0;
+      moon.arcHeight = rand(cfg.minArcHeight, cfg.maxArcHeight) * WORLD_SCALE;
+      moon.phase = cfg.randomPhase ? Math.random() : 0;
+      moon.fadeIn = 0;
+      moon.active = true;
+      moon.waiting = false;
+    }
+    return;
+  }
+  if (!moon.active) return;
+  moon.t += moon.speed * ds;
+  moon.glowPhase += ds * 0.5;
+  if (moon.fadeIn < 1) moon.fadeIn = Math.min(1, moon.fadeIn + ds / 0.6);
+  if (moon.t > 1.15) {
+    moon.t = 1.15;
+    moon.active = false;
+    moon.waiting = true;
+    moon.respawnTimer = cfg.reappearDelaySec;
+  }
+}
+
+function drawMoonShadow(x, y, r, phase) {
+  const cfg = CONFIG.moon;
+  const k = Math.cos(phase * Math.PI * 2);
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.fillStyle = cfg.shadowColor;
+  if (k >= 0) {
+    ctx.beginPath();
+    ctx.arc(x, y, r, Math.PI / 2, -Math.PI / 2, false);
+    ctx.ellipse(x, y, Math.max(0.01, r * (1 - k)), r, 0, -Math.PI / 2, Math.PI / 2, true);
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    const kk = -k;
+    ctx.beginPath();
+    ctx.arc(x, y, r, -Math.PI / 2, Math.PI / 2, false);
+    ctx.ellipse(x, y, Math.max(0.01, r * kk), r, 0, Math.PI / 2, -Math.PI / 2, true);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawMoon() {
+  if (!moon.active) return;
+  const { x, y } = moonPos();
+  const cfg = CONFIG.moon;
+  const r = cfg.radius * WORLD_SCALE;
+  const appearAlpha = clamp(moon.fadeIn, 0, 1);
+  if (appearAlpha <= 0.01) return;
+  const glowR = r * cfg.glowScale;
+  const pulse = 1 + Math.sin(moon.glowPhase) * 0.06;
+  const glow = ctx.createRadialGradient(x, y, r * 0.8, x, y, glowR * pulse);
+  glow.addColorStop(0, `rgba(232,224,200,${cfg.glowAlpha * 0.7 * appearAlpha})`);
+  glow.addColorStop(0.4, `rgba(232,224,200,${cfg.glowAlpha * 0.25 * appearAlpha})`);
+  glow.addColorStop(1, `rgba(232,224,200,0)`);
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(x, y, glowR * pulse, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = appearAlpha;
+  ctx.fillStyle = cfg.color;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.clip();
+  for (const c of moon.craters) {
+    const cx = x + c.rx * r;
+    const cy = y + c.ry * r;
+    const cr = c.rr * r;
+    ctx.globalAlpha = c.alpha * appearAlpha;
+    ctx.fillStyle = '#a09080';
+    ctx.beginPath();
+    ctx.arc(cx, cy, cr, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = c.alpha * 0.6 * appearAlpha;
+    ctx.strokeStyle = '#6a5a50';
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+  ctx.save();
+  ctx.globalAlpha = appearAlpha;
+  drawMoonShadow(x, y, r, moon.phase);
+  ctx.restore();
+  ctx.strokeStyle = `rgba(232,224,200,${0.15 * appearAlpha})`;
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+// ============================================================
+// РЕЛЬЕФ ЗЕМЛИ
+// ============================================================
+const groundHills = [];
+const groundRocks = [];
+const groundLights = [];
+
+function initGroundDetails() {
+  groundHills.length = 0;
+  groundRocks.length = 0;
+  groundLights.length = 0;
+  for (let layer = 0; layer < 2; layer++) {
+    const baseY = GROUND_Y - 4 - layer * 6;
+    const amp = 18 - layer * 6;
+    const points = [];
+    const steps = 24;
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const x = t * W;
+      const y = baseY
+        - Math.sin(t * Math.PI * 3.1 + layer * 1.7) * amp * 0.6
+        - Math.sin(t * Math.PI * 7.3 + layer * 0.9) * amp * 0.3
+        - Math.sin(t * Math.PI * 13.7 + layer * 2.1) * amp * 0.1;
+      points.push({ x, y });
+    }
+    groundHills.push({ layer, points, baseY });
+  }
+  for (let i = 0; i < 40; i++) {
+    groundRocks.push({
+      x: Math.random() * W,
+      y: GROUND_Y + 8 + Math.random() * (H - GROUND_Y - 20),
+      rx: rand(2, 8), ry: rand(1, 3),
+      alpha: rand(0.05, 0.18),
+      shade: Math.random() < 0.5 ? 0 : 1
+    });
+  }
+  for (let i = 0; i < 26; i++) {
+    groundLights.push({
+      x: Math.random() * W,
+      y: GROUND_Y - 1 + Math.random() * 3,
+      phase: Math.random() * Math.PI * 2,
+      speed: rand(0.4, 1.2),
+      size: Math.random() < 0.7 ? 1 : 1.5
+    });
+  }
+}
+
+function drawGround(t) {
+  const haze = ctx.createLinearGradient(0, GROUND_Y - 160, 0, GROUND_Y);
+  haze.addColorStop(0, 'rgba(90,140,220,0)');
+  haze.addColorStop(0.55, 'rgba(90,140,220,0.06)');
+  haze.addColorStop(0.85, 'rgba(120,180,255,0.18)');
+  haze.addColorStop(1, 'rgba(140,200,255,0.32)');
+  ctx.fillStyle = haze;
+  ctx.fillRect(0, GROUND_Y - 160, W, 160);
+  for (const hill of groundHills) {
+    ctx.beginPath();
+    ctx.moveTo(0, hill.baseY + 20);
+    for (const p of hill.points) ctx.lineTo(p.x, p.y);
+    ctx.lineTo(W, hill.baseY + 20);
+    ctx.closePath();
+    const hillGrad = ctx.createLinearGradient(0, hill.baseY - 30, 0, hill.baseY + 20);
+    if (hill.layer === 0) {
+      hillGrad.addColorStop(0, 'rgba(70,110,170,0.45)');
+      hillGrad.addColorStop(1, 'rgba(40,70,120,0.25)');
+    } else {
+      hillGrad.addColorStop(0, 'rgba(30,55,95,0.75)');
+      hillGrad.addColorStop(1, 'rgba(15,30,55,0.5)');
+    }
+    ctx.fillStyle = hillGrad;
+    ctx.fill();
+  }
+  for (const L of groundLights) {
+    const a = 0.4 + Math.sin(t * 0.001 * L.speed + L.phase) * 0.35;
+    ctx.globalAlpha = clamp(a, 0, 1) * 0.7;
+    ctx.fillStyle = '#ffd27a';
+    ctx.fillRect(L.x, L.y, L.size, L.size);
+  }
+  ctx.globalAlpha = 1;
+  const groundGrad = ctx.createLinearGradient(0, GROUND_Y, 0, H);
+  groundGrad.addColorStop(0, '#1f3550');
+  groundGrad.addColorStop(0.35, '#16283e');
+  groundGrad.addColorStop(0.75, '#0d1a2a');
+  groundGrad.addColorStop(1, '#060d16');
+  ctx.fillStyle = groundGrad;
+  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+  for (const r of groundRocks) {
+    ctx.globalAlpha = r.alpha;
+    ctx.fillStyle = r.shade === 0 ? '#3a5a7a' : '#050d18';
+    ctx.beginPath();
+    ctx.ellipse(r.x, r.y, r.rx, r.ry, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = 'rgba(80,120,170,0.10)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 5; i++) {
+    const y = GROUND_Y + 14 + i * 14;
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 20) {
+      const yy = y + Math.sin(x * 0.05 + i * 1.3 + t * 0.0003) * 1.5;
+      if (x === 0) ctx.moveTo(x, yy);
+      else ctx.lineTo(x, yy);
+    }
+    ctx.stroke();
+  }
+  const vignette = ctx.createLinearGradient(0, H - 60, 0, H);
+  vignette.addColorStop(0, 'rgba(0,0,0,0)');
+  vignette.addColorStop(1, 'rgba(0,0,0,0.5)');
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, H - 60, W, 60);
+}
+
+// ============================================================
+// СПУТНИКИ
+// ============================================================
+let satellites = [];
+let nextSatId = 1;
+
+function pickSatType() {
+  const r = Math.random();
+  let acc = 0;
+  for (const key of Object.keys(CONFIG.satTypes)) {
+    acc += CONFIG.satTypes[key].weight;
+    if (r <= acc) return key;
+  }
+  return 'normal';
+}
+
+function pickUniqueName(baseNames) {
+  const used = new Set();
+  for (const s of satellites) if (s.name) used.add(s.name);
+  const pool = baseNames.slice();
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  for (const name of pool) {
+    if (!used.has(name)) return name;
+  }
+  const first = pool[0] || 'SAT';
+  let n = 2;
+  while (used.has(`${first}-${n}`)) n++;
+  return `${first}-${n}`;
+}
+
+function spawnSatellite(forceType, forceInactive) {
+  const isInactive = forceInactive === true;
+  let type, cfg, name;
+  if (isInactive) {
+    type = 'inactive';
+    cfg = CONFIG.inactive;
+    name = pickUniqueName(CONFIG.inactive.names);
+  } else {
+    type = forceType || pickSatType();
+    cfg = CONFIG.satTypes[type];
+    name = pickUniqueName(cfg.names);
+  }
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const baseY = Math.round(H * (CONFIG.satellite.baseY / CONFIG.world.height));
+
+  let arcHeight = rand(CONFIG.satellite.minHeight, CONFIG.satellite.maxHeight) * WORLD_SCALE;
+  let peakY = baseY - arcHeight;
+
+  // Не даём спутнику улететь выше, чем достаёт луч.
+  const ceiling = highestReachableY();
+  if (peakY < ceiling) {
+    peakY = ceiling;
+    arcHeight = baseY - peakY;
+  }
+  const arcRatio = arcHeight / Math.max(1, baseY);
+
+  const flightTime = rand(CONFIG.satellite.flightTimeMin, CONFIG.satellite.flightTimeMax) / (cfg.speedMul || 1);
+  const speed = 1 / flightTime;
+  return {
+    id: nextSatId++,
+    inactive: isInactive,
+    name, type, cfg, dir, peakY, baseY, arcRatio,
+    t: 0, speed,
+    dataLeft: cfg.dataAmount || 0,
+    dataTotal: cfg.dataAmount || 0,
+    downloading: false, completed: false, awarded: false,
+    missedCounted: false, lostUntil: 0,
+    wobble: Math.random() * Math.PI * 2,
+    rotation: 0, justCompletedFlash: 0, uplinkPhase: 0,
+  };
+}
+
+function satPos(s) {
+  const t = clamp(s.t, 0, 1);
+  const edge = CONFIG.satellite.edgeX * WORLD_SCALE;
+  const x0 = s.dir > 0 ? -edge : W + edge;
+  const x1 = s.dir > 0 ? W + edge : -edge;
+  const x = lerp(x0, x1, t);
+  const arc = Math.sin(t * Math.PI);
+  const y = s.baseY - (s.baseY - s.peakY) * arc;
+  return { x, y };
+}
+
+function satPosFuture(s, sec) {
+  const saved = s.t;
+  s.t = clamp(s.t + s.speed * sec, 0, 1);
+  const p = satPos(s);
+  s.t = saved;
+  return p;
+}
+
+function isSatelliteVisible(s) {
+  const p = satPos(s);
+  return p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= GROUND_Y;
+}
+
+function satTimeLeftOnScreen(s) {
+  const remainingT = Math.max(0, 1.05 - s.t);
+  return remainingT / s.speed;
+}
+
+function satTimeToFinish(s, rateMul) {
+  return s.dataLeft / (s.cfg.dataRate * Math.max(rateMul, 0.0001));
+}
+
+function updateSatellites(dt) {
+  const ds = dt / 1000;
+  for (let i = satellites.length - 1; i >= 0; i--) {
+    const s = satellites[i];
+    s.t += s.speed * ds;
+    s.wobble += ds * 8;
+    s.uplinkPhase += ds * CONFIG.uplink.pulseSpeed * 0.5;
+    if (s.justCompletedFlash > 0) s.justCompletedFlash -= ds * 2;
+    const slope = Math.cos(s.t * Math.PI);
+    s.rotation = s.dir * slope * 0.55;
+    if (s.t > 1.05) satellites.splice(i, 1);
+  }
+}
+
+// ============================================================
+// АНТЕННА
+// ============================================================
+const antenna = {
+  angle: -Math.PI / 2,
+  targetAngle: -Math.PI / 2,
+  energy: CONFIG.energy.max
+};
+
+const autoTrack = {
+  unlocked: false, charges: 0, active: false, timeLeft: 0,
+  flash: 0, target: null, retargetTimer: 0,
+};
+
+let pointerManualUntil = 0;
+
+function beamDirection() {
+  return { dx: Math.cos(antenna.angle), dy: Math.sin(antenna.angle) };
+}
+
+function dishGeometry() {
+  const a = antenna.angle;
+  const { dx, dy } = beamDirection();
+  const scale = WORLD_SCALE;
+  const pivotX = ANTENNA_BASE.x;
+  const pivotY = ANTENNA_BASE.y - 8 * scale;
+  const off = CONFIG.antenna.dishOffset * scale;
+  const cx = pivotX + dx * off;
+  const cy = pivotY + dy * off;
+  const px = -dy, py = dx;
+  const r = CONFIG.antenna.dishRadius * scale;
+  const topX = cx + px * r, topY = cy + py * r;
+  const botX = cx - px * r, botY = cy - py * r;
+  return { pivotX, pivotY, cx, cy, dx, dy, px, py, r, topX, topY, botX, botY, scale };
+}
+
+function inCaptureZone(px, py) {
+  const { dx, dy } = beamDirection();
+  const vx = px - ANTENNA_BASE.x;
+  const vy = py - ANTENNA_BASE.y;
+  const len = Math.hypot(vx, vy);
+  if (len < 1 || len > captureLengthWorld()) return false;
+  if (vy > 0) return false;
+  const dot = (vx * dx + vy * dy) / len;
+  const ang = Math.acos(clamp(dot, -1, 1));
+  return ang < CONFIG.captureZone.halfAngle;
+}
+
+function rateMulFromEnergy(ratio) {
+  if (ratio < CONFIG.energy.criticalThreshold) return CONFIG.energy.criticalRateMul;
+  return 1.0;
+}
+
+function hasActiveTarget() {
+  for (const s of satellites) {
+    if (s.inactive) continue;
+    if (s.completed) continue;
+    if (!isSatelliteVisible(s)) continue;
+    const p = satPos(s);
+    if (inCaptureZone(p.x, p.y)) return true;
+  }
+  return false;
+}
+
+function pointerToAngle(px, py) {
+  const dx = px - ANTENNA_BASE.x;
+  const dy = py - ANTENNA_BASE.y;
+  if (dy >= 0) return dx < 0 ? CONFIG.antenna.minAngle : CONFIG.antenna.maxAngle;
+  const a = Math.atan2(dy, dx);
+  return clamp(a, CONFIG.antenna.minAngle, CONFIG.antenna.maxAngle);
+}
+
+// ============================================================
+// АС
+// ============================================================
+function pickBestTarget() {
+  const cfg = CONFIG.autoTrack;
+  const rateMul = rateMulFromEnergy(antenna.energy / CONFIG.energy.max);
+  const now = performance.now();
+  const candidates = [];
+  for (const s of satellites) {
+    if (s.inactive) continue;
+    if (s.completed) continue;
+    if (!isSatelliteVisible(s)) continue;
+    if (now < s.lostUntil) continue;
+    const tLeft = satTimeLeftOnScreen(s);
+    if (tLeft <= 0.05) continue;
+    const tFinish = satTimeToFinish(s, rateMul);
+    const canFinish = tLeft >= tFinish + cfg.priorityMargin;
+    const progress = Math.min(1, (tLeft * s.cfg.dataRate * rateMul) / Math.max(s.dataLeft, 0.0001));
+    const p = satPos(s);
+    const dx = p.x - ANTENNA_BASE.x;
+    const dy = p.y - ANTENNA_BASE.y;
+    const dist = Math.hypot(dx, dy);
+    candidates.push({ s, canFinish, tFinish, tLeft, progress, dist });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => {
+    if (cfg.preferFinishing) {
+      if (a.canFinish !== b.canFinish) return a.canFinish ? -1 : 1;
+    }
+    if (a.canFinish && b.canFinish) {
+      if (Math.abs(a.tLeft - b.tLeft) > 0.5) return a.tLeft - b.tLeft;
+    } else {
+      if (Math.abs(a.progress - b.progress) > 0.05) return b.progress - a.progress;
+    }
+    return a.dist - b.dist;
+  });
+  return candidates[0].s;
+}
+
+function updateAutoTrackTarget(dt) {
+  const cfg = CONFIG.autoTrack;
+  if (autoTrack.target) {
+    const s = autoTrack.target;
+    const stillValid =
+      !s.inactive && !s.completed && satellites.includes(s) &&
+      isSatelliteVisible(s) && satTimeLeftOnScreen(s) > 0.05;
+    if (stillValid) return;
+    if (!s.completed && !s.inactive) {
+      s.lostUntil = performance.now() + cfg.lostTargetCooldownSec * 1000;
+    }
+    autoTrack.target = null;
+  }
+  if (autoTrack.retargetTimer > 0) {
+    autoTrack.retargetTimer -= dt / 1000;
+    if (autoTrack.retargetTimer > 0) return;
+  }
+  const newTarget = pickBestTarget();
+  if (newTarget) {
+    autoTrack.target = newTarget;
+    autoTrack.retargetTimer = cfg.retargetIntervalSec;
+  } else {
+    autoTrack.retargetTimer = 0.15;
+  }
+}
+
+function toggleAutoTrack() {
+  if (!autoTrack.unlocked) return;
+  if (autoTrack.active) return;
+  if (autoTrack.charges > 0) {
+    autoTrack.charges--;
+    autoTrack.active = true;
+    autoTrack.timeLeft = CONFIG.autoTrack.durationSec;
+    autoTrack.target = null;
+    autoTrack.retargetTimer = 0;
+    pointerManualUntil = 0;
+    sfx('autoTrack');
+  }
+}
+
+function updateAntenna(dt, pointer) {
+  const ds = dt / 1000;
+  const now = performance.now();
+  const isManual = pointer && now < pointerManualUntil;
+  if (isManual) {
+    antenna.targetAngle = pointerToAngle(pointer.x, pointer.y);
+  } else if (autoTrack.active) {
+    if (CONFIG.autoTrack.holdUntilDone) updateAutoTrackTarget(dt);
+    const target = CONFIG.autoTrack.holdUntilDone ? autoTrack.target : pickBestTarget();
+    if (target) {
+      let aimX, aimY;
+      if (CONFIG.autoTrack.useLead) {
+        const fut = satPosFuture(target, CONFIG.autoTrack.leadSec);
+        aimX = fut.x; aimY = fut.y;
+      } else {
+        const p = satPos(target);
+        aimX = p.x; aimY = p.y;
+      }
+      const desired = pointerToAngle(aimX, aimY);
+      const maxStep = CONFIG.autoTrack.turnSpeed * ds;
+      let diff = desired - antenna.targetAngle;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      antenna.targetAngle += clamp(diff, -maxStep, maxStep);
+    }
+  }
+  antenna.targetAngle = clamp(antenna.targetAngle, CONFIG.antenna.minAngle, CONFIG.antenna.maxAngle);
+  let diff = antenna.targetAngle - antenna.angle;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  antenna.angle += diff * Math.min(1, dt * CONFIG.antenna.rotateSpeed);
+  const onActiveTarget = hasActiveTarget();
+  if (onActiveTarget) {
+    antenna.energy = Math.max(0, antenna.energy - CONFIG.energy.drainPerSec * ds);
+  } else {
+    antenna.energy = Math.min(CONFIG.energy.max, antenna.energy + CONFIG.energy.regenPerSec * ds);
+  }
+}
+
+// ============================================================
+// ЛУЧ
+// ============================================================
+function drawBeam() {
+  const g = dishGeometry();
+  const { dx, dy, px, py, cx, cy, topX, topY, botX, botY, r } = g;
+  const len = beamLengthWorld();
+  const half = CONFIG.antenna.beamHalfAngle;
+  const hasTarget = hasActiveTarget();
+  const energyRatio = antenna.energy / CONFIG.energy.max;
+  const isCritical = energyRatio < CONFIG.energy.criticalThreshold;
+  let alphaMul = 1.0;
+  if (isCritical) {
+    const tSec = performance.now() / 1000;
+    const ph = Math.sin(tSec * CONFIG.energy.criticalBlinkHz * Math.PI * 2);
+    alphaMul = 1.0 - CONFIG.energy.criticalBlinkDepth * (0.5 - 0.5 * ph);
+  }
+  const baseA = (hasTarget ? CONFIG.antenna.alphaTarget : CONFIG.antenna.alphaIdle)
+                * CONFIG.antenna.alphaCore * alphaMul;
+  const ex = cx + dx * len;
+  const ey = cy + dy * len;
+  const spread = Math.tan(half) * len;
+  const farTopX = ex + px * spread, farTopY = ey + py * spread;
+  const farBotX = ex - px * spread, farBotY = ey - py * spread;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, W, GROUND_Y);
+  ctx.clip();
+  const coneGrad = ctx.createLinearGradient(cx, cy, ex, ey);
+  coneGrad.addColorStop(0, `rgba(140,220,255,${baseA * 1.2})`);
+  coneGrad.addColorStop(0.15, `rgba(120,200,255,${baseA * 0.9})`);
+  coneGrad.addColorStop(0.6, `rgba(90,180,255,${baseA * 0.4})`);
+  coneGrad.addColorStop(1, `rgba(80,180,255,${CONFIG.antenna.alphaEdge})`);
+  ctx.fillStyle = coneGrad;
+  ctx.beginPath();
+  ctx.moveTo(topX, topY);
+  ctx.lineTo(farTopX, farTopY);
+  ctx.lineTo(farBotX, farBotY);
+  ctx.lineTo(botX, botY);
+  ctx.closePath();
+  ctx.fill();
+  const srcGlow = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * 1.2);
+  srcGlow.addColorStop(0, `rgba(200,240,255,${baseA * 1.6})`);
+  srcGlow.addColorStop(0.5, `rgba(140,220,255,${baseA * 0.6})`);
+  srcGlow.addColorStop(1, `rgba(90,180,255,0)`);
+  ctx.fillStyle = srcGlow;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 1.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// ============================================================
+// ОТВЕТНЫЙ ЛУЧ
+// ============================================================
+function uplinkTargetPoint() {
+  const { dx, dy } = beamDirection();
+  const scale = WORLD_SCALE;
+  if (CONFIG.uplink.target === 'base') {
+    return { x: ANTENNA_BASE.x, y: ANTENNA_BASE.y - 30 * scale };
+  }
+  if (CONFIG.uplink.target === 'beam') {
+    return { x: ANTENNA_BASE.x + dx * 60 * scale, y: ANTENNA_BASE.y + dy * 60 * scale };
+  }
+  const g = dishGeometry();
+  return {
+    x: g.cx + dx * CONFIG.antenna.subReflDist * scale,
+    y: g.cy + dy * CONFIG.antenna.subReflDist * scale
+  };
+}
+
+function drawUplink(s) {
+  if (s.inactive || !s.downloading || s.completed) return;
+  const p = satPos(s);
+  const cfg = s.cfg;
+  const color = CONFIG.uplink.useSatColor ? cfg.color : '#a0e0ff';
+  const target = uplinkTargetPoint();
+  const bx = target.x, by = target.y;
+  const pulse = 0.5 + 0.5 * Math.sin(s.uplinkPhase);
+  const alpha = CONFIG.uplink.baseAlpha + CONFIG.uplink.pulseAmp * pulse;
+  const grad = ctx.createLinearGradient(p.x, p.y, bx, by);
+  grad.addColorStop(0, color + 'ee');
+  grad.addColorStop(0.6, color + '88');
+  grad.addColorStop(1, color + '22');
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = grad;
+  ctx.lineWidth = CONFIG.uplink.lineWidth * WORLD_SCALE;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(p.x, p.y);
+  ctx.lineTo(bx, by);
+  ctx.stroke();
+  const dx = bx - p.x, dy = by - p.y;
+  const count = CONFIG.uplink.packetCount;
+  for (let k = 0; k < count; k++) {
+    const tt = ((s.uplinkPhase * CONFIG.uplink.packetSpeed + k / count) % 1);
+    const px = p.x + dx * tt, py = p.y + dy * tt;
+    const dotAlpha = alpha * (1 - tt * 0.6);
+    const pr = CONFIG.uplink.packetRadius * WORLD_SCALE;
+    ctx.globalAlpha = dotAlpha;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(px, py, pr, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = dotAlpha * 0.4;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(px, py, pr * 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// ИКОНКА СПУТНИКА
+// ============================================================
+function drawSatelliteIcon(cx, cy, scale, rotation, cfg, opts) {
+  opts = opts || {};
+  const dim = opts.dim || false;
+  const outline = opts.outline || false;
+  const crossOut = opts.crossOut || false;
+  const s = scale * WORLD_SCALE;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(rotation || 0);
+  ctx.scale(s, s);
+  if (outline) {
+    ctx.strokeStyle = 'rgba(255,95,122,0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(-14, -4, 8, 8);
+    ctx.strokeRect(6, -4, 8, 8);
+    ctx.strokeRect(-4, -5, 8, 10);
+    ctx.beginPath();
+    ctx.moveTo(0, -5); ctx.lineTo(0, -10); ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, -10, 1.8, 0, Math.PI * 2);
+    ctx.stroke();
+  } else {
+    ctx.fillStyle = dim ? '#2a3a4a' : '#2a3d5c';
+    ctx.fillRect(-14, -4, 8, 8);
+    ctx.fillRect(6, -4, 8, 8);
+    ctx.fillStyle = dim ? '#5a6a7a' : cfg.color;
+    ctx.fillRect(-14, -4, 8, 2);
+    ctx.fillRect(-14, 0, 8, 2);
+    ctx.fillRect(6, -4, 8, 2);
+    ctx.fillRect(6, 0, 8, 2);
+    ctx.fillStyle = dim ? '#8a9aaa' : '#c8d4e6';
+    ctx.fillRect(-4, -5, 8, 10);
+    ctx.fillStyle = dim ? '#6a7a8a' : '#8fa2bf';
+    ctx.fillRect(-4, -5, 8, 3);
+    ctx.strokeStyle = dim ? '#8a9aaa' : '#e0e8ff';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, -5); ctx.lineTo(0, -10); ctx.stroke();
+    ctx.fillStyle = dim ? '#5a6a7a' : cfg.color;
+    ctx.beginPath();
+    ctx.arc(0, -10, 1.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  if (crossOut) {
+    ctx.strokeStyle = 'rgba(255,95,122,0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(-12, -12); ctx.lineTo(12, 12);
+    ctx.moveTo(12, -12); ctx.lineTo(-12, 12);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ============================================================
+// ОТРИСОВКА СПУТНИКА
+// ============================================================
+function drawSatellite(s) {
+  const p = satPos(s);
+  const cfg = s.cfg;
+  const edgeFade = Math.min(1, Math.sin(s.t * Math.PI) * 3);
+  const alpha = clamp(edgeFade, 0, 1);
+  if (alpha <= 0.01) return;
+  const glowSize = (10 + Math.sin(s.wobble) * 3) * WORLD_SCALE;
+  const glowMul = (s.inactive ? 0.5 : (s.completed ? 0.35 : 1));
+  ctx.globalAlpha = alpha * (s.inactive ? 0.6 : 1);
+  const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, glowSize * 2.4);
+  g.addColorStop(0, cfg.glow + (s.completed ? '44' : 'aa'));
+  g.addColorStop(0.4, cfg.glow + (s.completed ? '22' : '44'));
+  g.addColorStop(1, cfg.glow + '00');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, glowSize * 2.4 * glowMul, 0, Math.PI * 2);
+  ctx.fill();
+  if (s.inactive) {
+    ctx.globalAlpha = alpha * 0.45;
+    drawSatelliteIcon(p.x, p.y, 1, s.rotation, cfg, { dim: true });
+    ctx.globalAlpha = alpha * 0.5;
+  } else if (s.completed) {
+    ctx.globalAlpha = alpha * 0.55;
+    drawSatelliteIcon(p.x, p.y, 1, s.rotation, cfg, { dim: true });
+    ctx.globalAlpha = alpha;
+  } else {
+    drawSatelliteIcon(p.x, p.y, 1, s.rotation, cfg, {});
+    ctx.globalAlpha = alpha;
+  }
+  if (!s.inactive && s.downloading && !s.completed) {
+    ctx.strokeStyle = cfg.color;
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = alpha * (0.6 + Math.sin(s.wobble * 3) * 0.3);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 18 * WORLD_SCALE, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  if (!s.inactive && s.justCompletedFlash > 0) {
+    const k = 1 - s.justCompletedFlash;
+    ctx.globalAlpha = alpha * s.justCompletedFlash * 0.9;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, (18 + k * 26) * WORLD_SCALE, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  if (!s.inactive && !s.completed && s.dataLeft < s.dataTotal) {
+    ctx.globalAlpha = alpha;
+    const w = 32 * WORLD_SCALE, h = 4 * WORLD_SCALE;
+    const x = p.x - w / 2, y = p.y - 28 * WORLD_SCALE;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(x - 1, y - 1, w + 2, h + 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fillRect(x, y, w, h);
+    const remaining = s.dataLeft / s.dataTotal;
+    const grad = ctx.createLinearGradient(x, 0, x + w, 0);
+    grad.addColorStop(0, cfg.color);
+    grad.addColorStop(1, '#ffffff');
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, y, w * remaining, h);
+  }
+  if (s.name) {
+    const labelY = p.y + 24 * WORLD_SCALE;
+    ctx.globalAlpha = alpha * (s.inactive ? 0.55 : 0.9);
+    ctx.font = `bold ${Math.round(9 * WORLD_SCALE)}px -apple-system, Arial`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillText(s.name, p.x + 0.5, labelY + 0.5);
+    ctx.fillStyle = s.inactive ? '#8a96aa' : (s.completed ? '#7a869a' : cfg.color);
+    ctx.fillText(s.name, p.x, labelY);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// ДУГИ
+// ============================================================
+function drawArcGuides() {
+  ctx.strokeStyle = 'rgba(120,180,255,0.05)';
+  ctx.lineWidth = 1;
+  const baseY = Math.round(H * (CONFIG.satellite.baseY / CONFIG.world.height));
+  const edge = CONFIG.satellite.edgeX * WORLD_SCALE;
+  const ceiling = highestReachableY();
+  for (let k = 0; k < 3; k++) {
+    const h = (180 + k * 100) * WORLD_SCALE;
+    let peakY = baseY - h;
+    if (peakY < ceiling) peakY = ceiling;
+    ctx.beginPath();
+    for (let i = 0; i <= 40; i++) {
+      const t = i / 40;
+      const x = -edge + (W + edge * 2) * t;
+      const arc = Math.sin(t * Math.PI);
+      const y = baseY - (baseY - peakY) * arc;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+}
+
+// ============================================================
+// АНТЕННА (рисование)
+// ============================================================
+function drawAntenna() {
+  const scale = WORLD_SCALE;
+  const { x, y } = ANTENNA_BASE;
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(scale, scale);
+
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath();
+  ctx.ellipse(0, 10, 26, 7, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#3a4258';
+  ctx.beginPath();
+  ctx.ellipse(0, 8, 22, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#2a3145';
+  ctx.fillRect(-18, 3, 36, 8);
+  ctx.fillStyle = '#1a2030';
+  for (let i = -1; i <= 1; i++) {
+    ctx.beginPath();
+    ctx.arc(i * 12, 6, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const pivotY = -8;
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(1, 3);
+  ctx.lineTo(1, pivotY);
+  ctx.stroke();
+  ctx.strokeStyle = '#6b7a95';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(0, 3);
+  ctx.lineTo(0, pivotY);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(180,210,255,0.5)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(-0.8, 3);
+  ctx.lineTo(-0.8, pivotY);
+  ctx.stroke();
+  ctx.fillStyle = '#4a5670';
+  ctx.beginPath();
+  ctx.arc(0, pivotY, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#2a3145';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.restore();
+
+  const g = dishGeometry();
+  const a = antenna.angle;
+  ctx.save();
+  ctx.translate(g.cx, g.cy);
+  ctx.rotate(a);
+  const r = CONFIG.antenna.dishRadius * scale;
+  const depth = CONFIG.antenna.dishDepth * scale;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.beginPath();
+  ctx.ellipse(-depth + 2, 2, 4, r + 1, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#2a3550';
+  ctx.beginPath();
+  ctx.moveTo(0, -r);
+  ctx.quadraticCurveTo(-depth - 3, 0, 0, r);
+  ctx.lineTo(-2, r);
+  ctx.quadraticCurveTo(-depth - 5, 0, -2, -r);
+  ctx.closePath();
+  ctx.fill();
+  const dishGrad = ctx.createLinearGradient(-depth, 0, 4, 0);
+  dishGrad.addColorStop(0, '#a8b8d0');
+  dishGrad.addColorStop(0.5, '#d8e4f4');
+  dishGrad.addColorStop(1, '#eaf2ff');
+  ctx.fillStyle = dishGrad;
+  ctx.beginPath();
+  ctx.moveTo(0, -r);
+  ctx.quadraticCurveTo(-depth, 0, 0, r);
+  ctx.quadraticCurveTo(-depth + 3, 0, 0, -r);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#eaf2ff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(0, -r);
+  ctx.quadraticCurveTo(-depth, 0, 0, r);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(120,140,170,0.35)';
+  ctx.lineWidth = 0.6;
+  for (let i = 1; i < 5; i++) {
+    const fy = -r + (2 * r / 5) * i;
+    const yy = fy / r;
+    const xOnParabola = -depth * (1 - yy * yy);
+    ctx.beginPath();
+    ctx.moveTo(xOnParabola, fy);
+    ctx.lineTo(0, fy);
+    ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.beginPath();
+  ctx.ellipse(-depth + 1, 0, 2, r * 0.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  const fx = 1;
+  ctx.fillStyle = '#4a5670';
+  ctx.beginPath();
+  ctx.arc(fx, 0, 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#5fc8ff';
+  ctx.beginPath();
+  ctx.arc(fx, 0, 1, 0, Math.PI * 2);
+  ctx.fill();
+  const subDist = CONFIG.antenna.subReflDist * scale;
+  const subSize = CONFIG.antenna.subReflSize * scale;
+  ctx.strokeStyle = '#6b7a95';
+  ctx.lineWidth = 1;
+  for (let i = -1; i <= 1; i++) {
+    const ang = i * 0.15;
+    ctx.beginPath();
+    ctx.moveTo(fx, 0);
+    ctx.lineTo(subDist, Math.sin(ang) * subSize);
+    ctx.stroke();
+  }
+  ctx.save();
+  ctx.translate(subDist, 0);
+  ctx.fillStyle = '#c8d4e6';
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 1.5, subSize, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#4a5670';
+  ctx.lineWidth = 0.8;
+  ctx.stroke();
+  ctx.fillStyle = '#2a3550';
+  ctx.beginPath();
+  ctx.ellipse(0.5, 0, 1, subSize - 0.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  ctx.restore();
+}
+
+// ============================================================
+// СОСТОЯНИЕ
+// ============================================================
+const state = {
+  score: 0, level: 1, progress: 0,
+  progressMax: CONFIG.progression.levelProgressStart,
+  totalCaptured: 0, combo: 0, comboTimer: 0,
+  missedSats: 0, missedTotal: 0,
+  gameOver: false, started: false, time: 0,
+  spawnTimer: 0, spawnInterval: CONFIG.spawn.initialInterval,
+  inactiveSpawnTimer: 0, demo: true, finalResult: null,
+  lastTickAt: 0, lastCriticalAt: 0,
+};
+
+function reset() {
+  satellites = [];
+  state.score = 0; state.level = 1; state.progress = 0;
+  state.progressMax = CONFIG.progression.levelProgressStart;
+  state.totalCaptured = 0; state.combo = 0; state.comboTimer = 0;
+  state.missedSats = 0; state.missedTotal = 0;
+  state.gameOver = false; state.started = true;
+  state.time = 0; state.spawnTimer = 0;
+  state.spawnInterval = CONFIG.spawn.initialInterval;
+  state.inactiveSpawnTimer = 0;
+  state.demo = false; state.finalResult = null;
+  state.lastTickAt = 0; state.lastCriticalAt = 0;
+  antenna.energy = CONFIG.energy.max;
+  antenna.angle = -Math.PI / 2;
+  antenna.targetAngle = -Math.PI / 2;
+  autoTrack.unlocked = (state.level >= CONFIG.autoTrack.unlockLevel);
+  autoTrack.charges = autoTrack.unlocked ? CONFIG.autoTrack.chargesPerLevel : 0;
+  autoTrack.active = false;
+  autoTrack.timeLeft = 0;
+  autoTrack.flash = 0;
+  autoTrack.target = null;
+  autoTrack.retargetTimer = 0;
+  initStars(); initGroundDetails(); initMoon();
+}
+
+function demoRestart() {
+  satellites = [];
+  state.score = 0; state.level = 1; state.progress = 0;
+  state.progressMax = CONFIG.progression.levelProgressStart;
+  state.totalCaptured = 0; state.combo = 0; state.comboTimer = 0;
+  state.missedSats = 0; state.missedTotal = 0;
+  state.spawnTimer = 0;
+  state.spawnInterval = CONFIG.spawn.initialInterval;
+  state.inactiveSpawnTimer = 0;
+  antenna.energy = CONFIG.energy.max;
+  antenna.angle = -Math.PI / 2;
+  antenna.targetAngle = -Math.PI / 2;
+  autoTrack.unlocked = (state.level >= CONFIG.autoTrack.unlockLevel);
+  autoTrack.charges = autoTrack.unlocked ? CONFIG.autoTrack.chargesPerLevel : 0;
+  autoTrack.active = false;
+  autoTrack.timeLeft = 0;
+  autoTrack.flash = 0;
+  autoTrack.target = null;
+  autoTrack.retargetTimer = 0;
+  satellites.push(spawnSatellite('normal'));
+}
+
+function startGame() {
+  if (state.gameOver) reset();
+  else if (!state.started) reset();
+}
+
+function endGame() {
+  if (state.gameOver) return;
+  state.gameOver = true;
+  state.demo = true;
+  state.finalResult = {
+    score: state.score, level: state.level,
+    missedSats: state.missedSats, missedTotal: state.missedTotal,
+    totalCaptured: state.totalCaptured,
+  };
+  autoTrack.active = false;
+  autoTrack.timeLeft = 0;
+  autoTrack.target = null;
+}
+
+let lastTime = performance.now();
+
+function update(dt) {
+  state.time += dt;
+  updateStars(dt);
+  updateMoon(dt);
+  updateMeteors(dt);
+  if (!state.demo) {
+    const energyRatio = antenna.energy / CONFIG.energy.max;
+    if (energyRatio < CONFIG.energy.criticalThreshold) {
+      const nowMs = performance.now();
+      if (nowMs - state.lastCriticalAt >= CONFIG.audio.critical.intervalMs) {
+        sfx('critical');
+        state.lastCriticalAt = nowMs;
+      }
+    }
+  }
+  state.demo = !state.started || state.gameOver;
+  if (state.demo) {
+    autoTrack.active = true;
+    autoTrack.timeLeft = CONFIG.autoTrack.durationSec;
+  } else {
+    if (autoTrack.active) {
+      autoTrack.timeLeft -= dt / 1000;
+      if (autoTrack.timeLeft <= 0) {
+        autoTrack.active = false;
+        autoTrack.timeLeft = 0;
+        autoTrack.target = null;
+      }
+    }
+  }
+  if (autoTrack.flash > 0) autoTrack.flash -= dt / 1000;
+  state.spawnTimer += dt;
+  if (state.spawnTimer >= state.spawnInterval) {
+    state.spawnTimer = 0;
+    const activeCount = satellites.filter(s => !s.inactive).length;
+    if (activeCount < CONFIG.satellite.maxOnScreen) satellites.push(spawnSatellite());
+    state.spawnInterval = Math.max(
+      CONFIG.spawn.minInterval,
+      CONFIG.spawn.initialInterval - state.level * CONFIG.spawn.intervalDecreasePerLevel
+    );
+  }
+  state.inactiveSpawnTimer += dt;
+  if (state.inactiveSpawnTimer >= CONFIG.inactive.spawnInterval) {
+    state.inactiveSpawnTimer = 0;
+    const inactiveCount = satellites.filter(s => s.inactive).length;
+    if (inactiveCount < CONFIG.inactive.maxOnScreen) satellites.push(spawnSatellite(null, true));
+  }
+  updateAntenna(dt, pointer);
+  updateSatellites(dt);
+  const ds = dt / 1000;
+  const energyRatio = antenna.energy / CONFIG.energy.max;
+  const rateMul = rateMulFromEnergy(energyRatio);
+  for (const s of satellites) {
+    if (s.inactive) { s.downloading = false; continue; }
+    if (s.completed) { s.downloading = false; continue; }
+    if (!isSatelliteVisible(s)) { s.downloading = false; continue; }
+    const p = satPos(s);
+    if (inCaptureZone(p.x, p.y)) {
+      if (!s.downloading) sfx('capture');
+      s.downloading = true;
+      s.dataLeft = Math.max(0, s.dataLeft - s.cfg.dataRate * rateMul * ds);
+      const nowMs = performance.now();
+      if (nowMs - state.lastTickAt >= CONFIG.audio.downloadTick.intervalMs) {
+        sfx('downloadTick');
+        state.lastTickAt = nowMs;
+      }
+      if (s.dataLeft <= 0) completeDownload(s);
+    } else {
+      s.downloading = false;
+    }
+  }
+  for (const s of satellites) {
+    if (s.inactive) continue;
+    if (s.t > 1.02 && !s.completed && !s.missedCounted) {
+      s.missedCounted = true;
+      state.missedSats++;
+      state.missedTotal++;
+      sfx('miss');
+      const limit = CONFIG.progression.missedLimit;
+      if (limit > 0 && state.missedSats >= limit) {
+        if (state.demo) { demoRestart(); return; }
+        else { endGame(); return; }
+      }
+    }
+  }
+  if (state.combo > 0) {
+    state.comboTimer -= dt;
+    if (state.comboTimer <= 0) state.combo = 0;
+  }
+}
+
+function completeDownload(s) {
+  sfx('complete');
+  s.completed = true;
+  s.downloading = false;
+  s.justCompletedFlash = 1;
+  if (!s.awarded) {
+    s.awarded = true;
+    state.combo++;
+    state.comboTimer = CONFIG.progression.comboWindowMs;
+    const comboBonus = Math.floor(state.combo / CONFIG.progression.comboBonusEvery) * CONFIG.progression.comboBonusPoints;
+    const gain = s.cfg.score + comboBonus;
+    state.score += gain;
+    state.totalCaptured++;
+    state.progress += 20 + s.cfg.score;
+    if (state.progress >= state.progressMax) {
+      state.progress = 0;
+      state.level++;
+      sfx('levelUp');
+      state.progressMax = CONFIG.progression.levelProgressStart + state.level * CONFIG.progression.levelProgressAdd;
+      if (CONFIG.progression.resetMissedOnLevelUp) state.missedSats = 0;
+      const acfg = CONFIG.autoTrack;
+      if (state.level >= acfg.unlockLevel) {
+        if (!autoTrack.unlocked) {
+          autoTrack.unlocked = true;
+          autoTrack.flash = 1.5;
+        }
+        autoTrack.charges = Math.min(acfg.maxCharges, autoTrack.charges + acfg.chargesPerLevel);
+      }
+    }
+  }
+}
+
+// ============================================================
+// HUD
+// ============================================================
+function drawMissedIndicator() {
+  const limit = CONFIG.progression.missedLimit;
+  if (limit <= 0) return;
+  const s = WORLD_SCALE;
+  const x0 = 10 * s;
+  const y0 = 45 * s;
+  const step = 22 * s;
+  for (let i = 0; i < limit; i++) {
+    const cx = x0 + 12 * s + i * step;
+    const cy = y0 + 12 * s;
+    const missed = i < state.missedSats;
+    if (missed) {
+      drawSatelliteIcon(cx, cy, 0.55, 0, { color: '#5a6a7a' }, { dim: true, crossOut: true });
+    } else {
+      drawSatelliteIcon(cx, cy, 0.55, 0, { color: '#ff5f7a' }, { outline: true });
+    }
+  }
+}
+
+function autoTrackButtonCenter() {
+  const cfg = CONFIG.autoTrack;
+  const s = WORLD_SCALE;
+  return {
+    x: W - (cfg.buttonMargin + cfg.buttonRadius) * s,
+    y: H - (cfg.buttonMargin + cfg.buttonRadius) * s,
+    r: cfg.buttonRadius * s,
+  };
+}
+
+function hitAutoTrackButton(mx, my) {
+  if (!autoTrack.unlocked) return false;
+  const b = autoTrackButtonCenter();
+  const dx = mx - b.x;
+  const dy = my - b.y;
+  return dx * dx + dy * dy <= b.r * b.r;
+}
+
+function drawAutoTrackButton() {
+  const cfg = CONFIG.autoTrack;
+  const b = autoTrackButtonCenter();
+  const x = b.x, y = b.y, r = b.r;
+  const s = WORLD_SCALE;
+  let color = cfg.lockedColor;
+  if (autoTrack.unlocked) color = autoTrack.active ? cfg.activeColor : cfg.idleColor;
+  const canUse = autoTrack.unlocked && (autoTrack.charges > 0 || autoTrack.active);
+  const alpha = canUse ? 1 : 0.45;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  if (autoTrack.active) {
+    const glow = ctx.createRadialGradient(x, y, r * 0.8, x, y, r * 1.7);
+    glow.addColorStop(0, cfg.activeColor + '88');
+    glow.addColorStop(1, cfg.activeColor + '00');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(x, y, r * 1.7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(10,20,40,0.85)';
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2 * s;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.font = `bold ${Math.round(18 * s)}px -apple-system, Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('АС', x, y - 1);
+  if (autoTrack.active) {
+    const frac = clamp(autoTrack.timeLeft / cfg.durationSec, 0, 1);
+    ctx.strokeStyle = cfg.activeColor;
+    ctx.lineWidth = 3 * s;
+    ctx.beginPath();
+    ctx.arc(x, y, r + 4 * s, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+    ctx.stroke();
+  }
+  if (autoTrack.unlocked) {
+    const maxC = cfg.maxCharges;
+    const dotR = 2.5 * s;
+    const gap = 8 * s;
+    const totalW = (maxC - 1) * gap;
+    const startX = x - totalW / 2;
+    const dotY = y + r + 8 * s;
+    for (let i = 0; i < maxC; i++) {
+      const filled = i < autoTrack.charges;
+      ctx.beginPath();
+      ctx.arc(startX + i * gap, dotY, dotR, 0, Math.PI * 2);
+      if (filled) {
+        ctx.fillStyle = cfg.idleColor;
+        ctx.fill();
+      } else {
+        ctx.strokeStyle = 'rgba(120,180,255,0.4)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+  }
+  ctx.restore();
+  if (autoTrack.flash > 0) {
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, autoTrack.flash);
+    ctx.strokeStyle = cfg.activeColor;
+    ctx.lineWidth = 3 * s;
+    const rr = r + 8 * s + (1.5 - autoTrack.flash) * 20 * s;
+    ctx.beginPath();
+    ctx.arc(x, y, rr, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function soundButtonCenter() {
+  const s = WORLD_SCALE;
+  return { x: W - 26 * s, y: 100 * s, r: 14 * s };
+}
+
+function hitSoundButton(mx, my) {
+  const b = soundButtonCenter();
+  const dx = mx - b.x;
+  const dy = my - b.y;
+  return dx * dx + dy * dy <= b.r * b.r;
+}
+
+function drawSoundButton() {
+  const b = soundButtonCenter();
+  const x = b.x, y = b.y-25, r = b.r;
+  const s = WORLD_SCALE;
+  ctx.save();
+  ctx.fillStyle = 'rgba(10,20,40,0.75)';
+  ctx.beginPath();
+  ctx.arc(x+1, y, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = soundMuted ? 'rgba(120,130,150,0.8)' : 'rgba(95,184,255,0.8)';
+  ctx.lineWidth = 1.5 * s;
+  ctx.beginPath();
+  ctx.arc(x+1, y, r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = soundMuted ? '#7a869a' : '#5fb8ff';
+  ctx.strokeStyle = soundMuted ? '#7a869a' : '#5fb8ff';
+  ctx.beginPath();
+  ctx.moveTo(x - 5 * s, y - 3 * s);
+  ctx.lineTo(x - 2 * s, y - 3 * s);
+  ctx.lineTo(x + 2 * s, y - 6 * s);
+  ctx.lineTo(x + 2 * s, y + 6 * s);
+  ctx.lineTo(x - 2 * s, y + 3 * s);
+  ctx.lineTo(x - 5 * s, y + 3 * s);
+  ctx.closePath();
+  ctx.fill();
+  if (soundMuted) {
+    ctx.lineWidth = 1.8 * s;
+    ctx.beginPath();
+    ctx.moveTo(x + 4 * s, y - 3 * s);
+    ctx.lineTo(x + 8 * s, y + 3 * s);
+    ctx.moveTo(x + 8 * s, y - 3 * s);
+    ctx.lineTo(x + 4 * s, y + 3 * s);
+    ctx.stroke();
+  } else {
+    ctx.lineWidth = 1.2 * s;
+    ctx.beginPath();
+    ctx.arc(x + 2 * s, y, 3 * s, -Math.PI * 0.35, Math.PI * 0.35);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x + 2 * s, y, 5 * s, -Math.PI * 0.3, Math.PI * 0.3);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawHUD() {
+  const s = WORLD_SCALE;
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#e8f0ff';
+  ctx.font = `bold ${Math.round(28 * s)}px -apple-system, Arial`;
+  ctx.textAlign = 'left';
+  ctx.fillText(state.score, 10 * s, s);
+  ctx.font = `bold ${Math.round(12 * s)}px -apple-system, Arial`;
+  ctx.fillStyle = 'rgba(160,200,255,0.7)';
+  ctx.fillText('ОЧКИ', 10 * s, 30 * s);
+  drawMissedIndicator();
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#e8f0ff';
+  ctx.font = `bold ${Math.round(20 * s)}px -apple-system, Arial`;
+  ctx.fillText('УР. ' + state.level, W - 10 * s, 2 * s);
+  ctx.font = `bold ${Math.round(12 * s)}px -apple-system, Arial`;
+  ctx.fillStyle = 'rgba(160,200,255,0.7)';
+  ctx.fillText('Сеансы связи: ' + state.totalCaptured, W - 10 * s, 30 * s);
+  if (!state.demo) drawSoundButton();
+  const barW = 160 * s, barH = 6 * s;
+  const barX = W / 2 - barW / 2, barY = 12 * s;
+  ctx.fillStyle = 'rgba(80,140,220,0.2)';
+  ctx.fillRect(barX, barY, barW, barH);
+  const prog = clamp(state.progress / state.progressMax, 0, 1);
+  const pg = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+  pg.addColorStop(0, '#5fb8ff'); pg.addColorStop(1, '#5effa0');
+  ctx.fillStyle = pg;
+  ctx.fillRect(barX, barY, barW * prog, barH);
+  ctx.strokeStyle = 'rgba(120,180,255,0.4)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(barX, barY, barW, barH);
+  const eBarW = 120 * s, eBarH = 8 * s;
+  const eBarX = 16 * s, eBarY = H - 30 * s;
+  ctx.fillStyle = 'rgba(80,140,220,0.2)';
+  ctx.fillRect(eBarX, eBarY, eBarW, eBarH);
+  const ep = antenna.energy / CONFIG.energy.max;
+  const eg = ctx.createLinearGradient(eBarX, 0, eBarX + eBarW, 0);
+  eg.addColorStop(0, ep > CONFIG.energy.criticalThreshold ? '#5effa0' : '#ff5f7a');
+  eg.addColorStop(1, ep > CONFIG.energy.criticalThreshold ? '#5fb8ff' : '#ff9f5f');
+  ctx.fillStyle = eg;
+  ctx.fillRect(eBarX, eBarY, eBarW * ep, eBarH);
+  ctx.strokeStyle = 'rgba(120,180,255,0.5)';
+  ctx.strokeRect(eBarX, eBarY, eBarW, eBarH);
+  ctx.fillStyle = 'rgba(160,200,255,0.7)';
+  ctx.font = `bold ${Math.round(10 * s)}px -apple-system, Arial`;
+  ctx.textAlign = 'left';
+  ctx.fillText('ЭНЕРГИЯ', eBarX, eBarY - 14 * s);
+  if (state.combo >= 2) {
+    ctx.fillStyle = 'rgba(255,220,120,' + (0.6 + Math.sin(state.time * 0.01) * 0.3) + ')';
+    ctx.font = `bold ${Math.round(16 * s)}px -apple-system, Arial`;
+    ctx.textAlign = 'center';
+    ctx.fillText('КОМБО ×' + state.combo, W / 2, H - 60 * s);
+  }
+  if (!state.demo) drawAutoTrackButton();
+  if (!state.started && !state.gameOver) {
+    ctx.fillStyle = 'rgba(5,8,20,0.55)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#e8f0ff';
+    ctx.font = `bold ${Math.round(30 * s)}px -apple-system, Arial`;
+    ctx.fillText('UPLink', W / 2, H / 2 - 80 * s);
+    ctx.font = `${Math.round(16 * s)}px -apple-system, Arial`;
+    ctx.fillStyle = 'rgba(200,230,255,0.95)';
+    ctx.fillText('Наведи луч антенны на спутник', W / 2, H / 2 - 20 * s);
+    ctx.fillText('и дождись полной загрузки данных', W / 2, H / 2 + 8 * s);
+    ctx.font = `bold ${Math.round(18 * s)}px -apple-system, Arial`;
+    ctx.fillStyle = '#5fb8ff';
+    ctx.fillText('Коснись, чтобы начать', W / 2, H / 2 + 100 * s);
+  }
+  if (state.gameOver) {
+    ctx.fillStyle = 'rgba(5,8,20,0.65)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ff5f7a';
+    ctx.font = `bold ${Math.round(30 * s)}px -apple-system, Arial`;
+    ctx.fillText('СИГНАЛ ПОТЕРЯН', W / 2, H / 2 - 100 * s);
+    const fr = state.finalResult || {
+      score: state.score, level: state.level,
+      missedSats: state.missedSats, missedTotal: state.missedTotal,
+      totalCaptured: state.totalCaptured,
+    };
+    ctx.font = `${Math.round(16 * s)}px -apple-system, Arial`;
+    ctx.fillStyle = 'rgba(200,230,255,0.95)';
+    ctx.fillText('Очки: ' + fr.score, W / 2, H / 2 - 50 * s);
+    ctx.fillText('Уровень: ' + fr.level, W / 2, H / 2 - 22 * s);
+    ctx.fillText('Сеансов связи: ' + fr.totalCaptured, W / 2, H / 2 + 6 * s);
+    ctx.fillText('Потеряно: ' + fr.missedTotal, W / 2, H / 2 + 34 * s);
+    ctx.font = `bold ${Math.round(18 * s)}px -apple-system, Arial`;
+    ctx.fillStyle = '#5fb8ff';
+    ctx.fillText('Коснись, чтобы начать заново', W / 2, H / 2 + 100 * s);
+  }
+}
+
+// ============================================================
+// РЕНДЕР
+// ============================================================
+function render() {
+  const bg = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  bg.addColorStop(0, '#05060f');
+  bg.addColorStop(0.7, '#0a1330');
+  bg.addColorStop(1, '#132444');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+  for (const s of stars) {
+    const a = s.baseAlpha * (0.6 + Math.sin(s.phase) * 0.4);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r * WORLD_SCALE, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  drawMoon();
+  drawMeteors();
+  drawArcGuides();
+  drawGround(state.time);
+  for (const s of satellites) drawUplink(s);
+  drawBeam();
+  for (const s of satellites) drawSatellite(s);
+  drawAntenna();
+  drawHUD();
+}
+
+// ============================================================
+// ЦИКЛ
+// ============================================================
+const STEP = 1000 / 60;
+let acc = 0;
+
+function loop(t) {
+  const delta = Math.min(t - lastTime, 100);
+  lastTime = t;
+  acc += delta;
+  while (acc >= STEP) {
+    update(STEP);
+    acc -= STEP;
+  }
+  render();
+  requestAnimationFrame(loop);
+}
+
+// ============================================================
+// УПРАВЛЕНИЕ
+// ============================================================
+let pointer = null;
+
+function updatePointer(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  pointer = {
+    x: (clientX - rect.left) * (W / rect.width),
+    y: (clientY - rect.top) * (H / rect.height)
+  };
+  pointerManualUntil = performance.now() + CONFIG.autoTrack.manualOverrideMs;
+}
+
+canvas.addEventListener('mousemove', (e) => updatePointer(e.clientX, e.clientY));
+
+canvas.addEventListener('mousedown', (e) => {
+  unlockAudio();
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.clientX - rect.left) * (W / rect.width);
+  const my = (e.clientY - rect.top) * (H / rect.height);
+  if (!state.demo && hitSoundButton(mx, my+25)) { soundMuted = !soundMuted; return; }
+  if (!state.demo && hitAutoTrackButton(mx, my)) { toggleAutoTrack(); return; }
+  updatePointer(e.clientX, e.clientY);
+  startGame();
+});
+
+canvas.addEventListener('touchstart', (e) => {
+  unlockAudio();
+  e.preventDefault();
+  const t = e.touches[0];
+  const rect = canvas.getBoundingClientRect();
+  const mx = (t.clientX - rect.left) * (W / rect.width);
+  const my = (t.clientY - rect.top) * (H / rect.height);
+  if (!state.demo && hitSoundButton(mx, my+25)) { soundMuted = !soundMuted; return; }
+  if (!state.demo && hitAutoTrackButton(mx, my)) { toggleAutoTrack(); return; }
+  updatePointer(t.clientX, t.clientY);
+  startGame();
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  const t = e.touches[0];
+  updatePointer(t.clientX, t.clientY);
+}, { passive: false });
+
+canvas.addEventListener('touchend', (e) => { e.preventDefault(); }, { passive: false });
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+document.addEventListener('keydown', (e) => {
+  unlockAudio();
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === ' ') startGame();
+  if (!pointer) pointer = { x: ANTENNA_X, y: ANTENNA_BASE.y - 200 };
+  if (e.key === 'ArrowLeft') {
+    antenna.targetAngle = clamp(antenna.targetAngle - 0.05, CONFIG.antenna.minAngle, CONFIG.antenna.maxAngle);
+    pointerManualUntil = performance.now() + CONFIG.autoTrack.manualOverrideMs;
+  }
+  if (e.key === 'ArrowRight') {
+    antenna.targetAngle = clamp(antenna.targetAngle + 0.05, CONFIG.antenna.minAngle, CONFIG.antenna.maxAngle);
+    pointerManualUntil = performance.now() + CONFIG.autoTrack.manualOverrideMs;
+  }
+  if (e.key === 'a' || e.key === 'A' || e.key === 'ф' || e.key === 'Ф') {
+    if (!state.demo) toggleAutoTrack();
+  }
+  if (e.key === 'm' || e.key === 'M' || e.key === 'ь' || e.key === 'Ь') soundMuted = !soundMuted;
+  e.preventDefault();
+});
+
+// ============================================================
+// СТАРТ
+// ============================================================
+state.demo = true;
+state.started = false;
+
+resize();
+initStars();
+initMoon();
+satellites.push(spawnSatellite('normal'));
+nextMeteorAt = performance.now() + rand(1000, 3000);
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
